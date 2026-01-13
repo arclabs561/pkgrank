@@ -1,4 +1,4 @@
-module github.com/henrywallace/pkgrank
+module github.com/arclabs561/pkgrank
 
 require (
 	github.com/inconshreveable/mousetrap v1.0.0 // indirect
