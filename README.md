@@ -8,7 +8,7 @@ package import DAG.
 
 Example usage:
 ```sh
-$ go get -u github.com/henrywallace/pkgrank
+$ go get -u github.com/arclabs561/pkgrank
 $ pkgrank crypto/...
 0.046325 unsafe
 0.042954 io
