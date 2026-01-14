@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/henrywallace/pkgrank/pkg"
+	"github.com/arclabs561/pkgrank/pkg"
 	"github.com/spf13/cobra"
 )
 
