@@ -1,4 +1,4 @@
-module github.com/henrywallace/pkgrank
+module github.com/arclabs561/pkgrank
 
 go 1.21.0
 
