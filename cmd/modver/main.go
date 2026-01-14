@@ -1,8 +1,8 @@
 package main
 
 import (
-	"github.com/henrywallace/pkgrank/analyzers/modver"
-	"github.com/henrywallace/pkgrank/shared"
+	"github.com/arclabs561/pkgrank/analyzers/modver"
+	"github.com/arclabs561/pkgrank/shared"
 	"golang.org/x/tools/go/analysis/singlechecker"
 )
 
