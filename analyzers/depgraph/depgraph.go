@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/henrywallace/pkgrank/graph"
+	"github.com/arclabs561/pkgrank/graph"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/tools/go/analysis"
 )
