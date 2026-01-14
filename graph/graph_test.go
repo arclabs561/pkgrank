@@ -4,8 +4,8 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/henrywallace/pkgrank/graph"
-	"github.com/henrywallace/pkgrank/shared"
+	"github.com/arclabs561/pkgrank/graph"
+	"github.com/arclabs561/pkgrank/shared"
 )
 
 func TestGraphFactAdd(t *testing.T) {
