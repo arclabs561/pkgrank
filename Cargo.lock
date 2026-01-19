@@ -1535,6 +1535,7 @@ dependencies = [
 [[package]]
 name = "walk"
 version = "0.1.0"
+source = "git+https://github.com/arclabs561/walk?rev=63aba8acbaab64b21b2df2059db486d01d8c5a4e#63aba8acbaab64b21b2df2059db486d01d8c5a4e"
 dependencies = [
  "ordered-float",
  "petgraph",

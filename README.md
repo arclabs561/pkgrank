@@ -124,3 +124,12 @@ Tools (high level):
 - `pkgrank` intentionally avoids depending on private sibling repos.
   Centrality operators (PageRank / PPR / reachability / betweenness) come from `walk` (pulled via git).
 
+- For the dev super-workspace, you can still iterate on a local `walk/` checkout without changing
+  `pkgrank` by using a patch override:
+
+```toml
+# In your *dev super-workspace* root Cargo.toml:
+[patch."https://github.com/arclabs561/walk"]
+walk = { path = "walk" }
+```
+
