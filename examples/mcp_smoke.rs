@@ -33,9 +33,11 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("spawning: {} mcp-stdio", bin.display());
 
     let service = ()
-        .serve(TokioChildProcess::new(Command::new(&bin).configure(|cmd| {
-            cmd.arg("mcp-stdio");
-        }))?)
+        .serve(TokioChildProcess::new(Command::new(&bin).configure(
+            |cmd| {
+                cmd.arg("mcp-stdio");
+            },
+        ))?)
         .await?;
 
     let info = service.peer_info();
@@ -160,4 +162,3 @@ async fn main() -> anyhow::Result<()> {
     service.cancel().await?;
     Ok(())
 }
-

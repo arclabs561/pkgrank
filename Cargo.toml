@@ -27,7 +27,6 @@ petgraph = "0.6"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ureq = { version = "2.10", features = ["json"] }
-walk = { path = "../walk", version = "0.1.0", features = ["petgraph"] }
 tokio = { version = "1.40", features = ["full"], optional = true }
 rmcp = { version = "0.12.0", optional = true, features = ["macros", "server", "client", "transport-io", "transport-child-process", "schemars"] }
 schemars = { version = "1.2.0", optional = true, features = ["derive"] }

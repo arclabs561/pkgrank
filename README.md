@@ -121,5 +121,6 @@ Tools (high level):
 
 ### Dependencies / integration notes
 
-- Centrality operators are provided by the Tekne L1.5 crate `walk` (PageRank, PPR, reachability). `pkgrank` should not re-implement those algorithms.
+- `pkgrank` intentionally avoids depending on private sibling repos.
+  Centrality operators (PageRank / PPR / reachability) are implemented locally in `src/centrality.rs`.
 

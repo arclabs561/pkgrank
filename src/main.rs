@@ -9,7 +9,9 @@
 //! \]
 
 use anyhow::{anyhow, Context, Result};
-use cargo_metadata::{CargoOpt, DepKindInfo, DependencyKind, Metadata, MetadataCommand, Node, PackageId};
+use cargo_metadata::{
+    CargoOpt, DepKindInfo, DependencyKind, Metadata, MetadataCommand, Node, PackageId,
+};
 use clap::{Parser, Subcommand, ValueEnum};
 use petgraph::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -21,7 +23,9 @@ use std::process::Command as ProcessCommand;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod centrality;
-use centrality::{pagerank, personalized_pagerank, reachability_counts_edges, reverse_graph, PageRankConfig};
+use centrality::{
+    pagerank, personalized_pagerank, reachability_counts_edges, reverse_graph, PageRankConfig,
+};
 
 #[cfg(feature = "stdio")]
 use rmcp::{
@@ -30,8 +34,7 @@ use rmcp::{
     model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
     transport::stdio,
-    ErrorData as McpError,
-    ServiceExt,
+    ErrorData as McpError, ServiceExt,
 };
 #[cfg(feature = "stdio")]
 use schemars::JsonSchema;
@@ -633,7 +636,11 @@ fn main() -> Result<()> {
 }
 
 fn run_modules_sweep(args: &ModulesSweepArgs) -> Result<()> {
-    let continue_on_error = if args.fail_fast { false } else { args.continue_on_error };
+    let continue_on_error = if args.fail_fast {
+        false
+    } else {
+        args.continue_on_error
+    };
 
     // Resolve package list:
     let packages: Vec<String> = if !args.package.is_empty() {
@@ -658,7 +665,9 @@ fn run_modules_sweep(args: &ModulesSweepArgs) -> Result<()> {
         names.sort();
         names
     } else {
-        return Err(anyhow!("modules-sweep requires at least one -p/--package, or --all-packages"));
+        return Err(anyhow!(
+            "modules-sweep requires at least one -p/--package, or --all-packages"
+        ));
     };
 
     if packages.is_empty() {
@@ -739,7 +748,8 @@ fn run_modules_sweep(args: &ModulesSweepArgs) -> Result<()> {
             }
             Err(e) => {
                 if !continue_on_error {
-                    return Err(e).with_context(|| format!("modules-sweep failed for package `{pkg}`"));
+                    return Err(e)
+                        .with_context(|| format!("modules-sweep failed for package `{pkg}`"));
                 }
                 results.push(SweepOne::Err(SweepOneErr {
                     pkg: pkg.clone(),
@@ -1031,14 +1041,7 @@ fn run_modules(args: &ModulesArgs) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
         OutputFormat::Text => {
-            print_modules_text(
-                &eff,
-                &rows,
-                nodes,
-                edges,
-                &aggregate_label,
-                &top_edges,
-            );
+            print_modules_text(&eff, &rows, nodes, edges, &aggregate_label, &top_edges);
         }
     }
     Ok(())
@@ -1046,7 +1049,13 @@ fn run_modules(args: &ModulesArgs) -> Result<()> {
 
 fn run_modules_core(
     args: &ModulesArgs,
-) -> Result<(Vec<ModuleRow>, usize, usize, String, Vec<(String, String, f64)>)> {
+) -> Result<(
+    Vec<ModuleRow>,
+    usize,
+    usize,
+    String,
+    Vec<(String, String, f64)>,
+)> {
     // We intentionally shell out to cargo-modules:
     // - avoids embedding rust-analyzer crates into pkgrank
     // - keeps pkgrank MIT/Apache; cargo-modules is MPL-2.0
@@ -1079,11 +1088,27 @@ fn run_modules_core(
     }
 
     // Selection filters:
-    let no_externs = if args.include_externs { false } else { args.no_externs };
-    let no_sysroot = if args.include_sysroot { false } else { args.no_sysroot };
+    let no_externs = if args.include_externs {
+        false
+    } else {
+        args.no_externs
+    };
+    let no_sysroot = if args.include_sysroot {
+        false
+    } else {
+        args.no_sysroot
+    };
     let no_fns = if args.include_fns { false } else { args.no_fns };
-    let no_traits = if args.include_traits { false } else { args.no_traits };
-    let no_types = if args.include_types { false } else { args.no_types };
+    let no_traits = if args.include_traits {
+        false
+    } else {
+        args.no_traits
+    };
+    let no_types = if args.include_types {
+        false
+    } else {
+        args.no_types
+    };
 
     if no_externs {
         cmd.arg("--no-externs");
@@ -1153,12 +1178,13 @@ fn run_modules_core(
     } else {
         // File aggregation must be anchored to the *package*, not the workspace root.
         let crate_name = selected_pkg.clone().unwrap_or_else(|| "crate".to_string());
-        let crate_dir = resolve_package_dir(&args.manifest_path, &crate_name).unwrap_or_else(|| {
-            args.manifest_path
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| PathBuf::from("."))
-        });
+        let crate_dir =
+            resolve_package_dir(&args.manifest_path, &crate_name).unwrap_or_else(|| {
+                args.manifest_path
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from("."))
+            });
         let root_file = infer_rust_crate_root_file(&crate_dir, args, &crate_name);
         let (ng, labels) = contract_graph(&g, |name| {
             let module = owning_module(name);
@@ -1186,49 +1212,54 @@ fn run_modules_core(
             let in_degree = g2.neighbors_directed(n, Direction::Incoming).count();
             let out_degree = g2.neighbors_directed(n, Direction::Outgoing).count();
             let node = g2.node_weight(n).expect("node weight").clone();
-            let (kind, visibility, group_size, members_preview, top_members_pr) = match (&args.aggregate, &members_map) {
-                (ModuleAggregate::Node, _) => {
-                    let meta = node_meta.get(&node);
-                    (
-                        meta.and_then(|m| m.kind.clone()),
-                        meta.and_then(|m| m.visibility.clone()),
-                        None,
-                        None,
-                        None,
-                    )
-                }
-                (_, Some(map)) => {
-                    let members = map.get(&node).cloned().unwrap_or_default();
-                    let group_size = members.len();
-                    let mut preview = String::new();
-                    for (i, m) in members.iter().take(3).enumerate() {
-                        if i > 0 {
-                            preview.push_str(", ");
+            let (kind, visibility, group_size, members_preview, top_members_pr) =
+                match (&args.aggregate, &members_map) {
+                    (ModuleAggregate::Node, _) => {
+                        let meta = node_meta.get(&node);
+                        (
+                            meta.and_then(|m| m.kind.clone()),
+                            meta.and_then(|m| m.visibility.clone()),
+                            None,
+                            None,
+                            None,
+                        )
+                    }
+                    (_, Some(map)) => {
+                        let members = map.get(&node).cloned().unwrap_or_default();
+                        let group_size = members.len();
+                        let mut preview = String::new();
+                        for (i, m) in members.iter().take(3).enumerate() {
+                            if i > 0 {
+                                preview.push_str(", ");
+                            }
+                            preview.push_str(m);
                         }
-                        preview.push_str(m);
-                    }
-                    if group_size > 3 {
-                        preview.push_str(&format!(", …(+{})", group_size - 3));
-                    }
-                    // Top members by node-level PageRank.
-                    let mut scored: Vec<(&str, f64)> = members
-                        .iter()
-                        .filter_map(|m| node_index_by_name.get(m).map(|&i| (m.as_str(), node_pr[i])))
-                        .collect();
-                    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                    let mut tops = String::new();
-                    for (i, (m, s)) in scored.into_iter().take(args.members_top).enumerate() {
-                        if i > 0 {
-                            tops.push_str(", ");
+                        if group_size > 3 {
+                            preview.push_str(&format!(", …(+{})", group_size - 3));
                         }
-                        tops.push_str(&format!("{}({:.4})", m, s));
-                    }
-                    let top_members_pr = if tops.is_empty() { None } else { Some(tops) };
+                        // Top members by node-level PageRank.
+                        let mut scored: Vec<(&str, f64)> = members
+                            .iter()
+                            .filter_map(|m| {
+                                node_index_by_name.get(m).map(|&i| (m.as_str(), node_pr[i]))
+                            })
+                            .collect();
+                        scored.sort_by(|a, b| {
+                            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        let mut tops = String::new();
+                        for (i, (m, s)) in scored.into_iter().take(args.members_top).enumerate() {
+                            if i > 0 {
+                                tops.push_str(", ");
+                            }
+                            tops.push_str(&format!("{}({:.4})", m, s));
+                        }
+                        let top_members_pr = if tops.is_empty() { None } else { Some(tops) };
 
-                    (None, None, Some(group_size), Some(preview), top_members_pr)
-                }
-                _ => (None, None, None, None, None),
-            };
+                        (None, None, Some(group_size), Some(preview), top_members_pr)
+                    }
+                    _ => (None, None, None, None, None),
+                };
             ModuleRow {
                 node,
                 aggregate: aggregate_label.clone(),
@@ -1249,7 +1280,11 @@ fn run_modules_core(
         .collect();
 
     // Default ordering: dependency PageRank.
-    rows.sort_by(|a, b| b.pagerank.partial_cmp(&a.pagerank).unwrap_or(std::cmp::Ordering::Equal));
+    rows.sort_by(|a, b| {
+        b.pagerank
+            .partial_cmp(&a.pagerank)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut top_edges: Vec<(String, String, f64)> = Vec::new();
     if args.edges_top > 0 {
@@ -1262,7 +1297,13 @@ fn run_modules_core(
         top_edges.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
     }
 
-    Ok((rows, g2.node_count(), g2.edge_count(), aggregate_label, top_edges))
+    Ok((
+        rows,
+        g2.node_count(),
+        g2.edge_count(),
+        aggregate_label,
+        top_edges,
+    ))
 }
 
 fn apply_modules_preset(args: &ModulesArgs) -> ModulesArgs {
@@ -1281,7 +1322,9 @@ fn apply_modules_preset(args: &ModulesArgs) -> ModulesArgs {
         ModulesPreset::None => return out,
         ModulesPreset::FileFull => {
             // If caller left aggregate at a non-file default, steer to file.
-            set_if(!matches!(args.aggregate, ModuleAggregate::File), &mut |a| a.aggregate = ModuleAggregate::File);
+            set_if(!matches!(args.aggregate, ModuleAggregate::File), &mut |a| {
+                a.aggregate = ModuleAggregate::File
+            });
             set_if(matches!(args.edge_kind, ModuleEdgeKind::Uses), &mut |_a| {});
             // include fns/types/traits
             set_if(!args.include_fns, &mut |a| a.include_fns = true);
@@ -1292,7 +1335,9 @@ fn apply_modules_preset(args: &ModulesArgs) -> ModulesArgs {
             set_if(args.members_top == 3, &mut |_a| {});
         }
         ModulesPreset::FileApi => {
-            set_if(!matches!(args.aggregate, ModuleAggregate::File), &mut |a| a.aggregate = ModuleAggregate::File);
+            set_if(!matches!(args.aggregate, ModuleAggregate::File), &mut |a| {
+                a.aggregate = ModuleAggregate::File
+            });
             set_if(!args.include_types, &mut |a| a.include_types = true);
             set_if(!args.include_traits, &mut |a| a.include_traits = true);
             // keep functions hidden by default
@@ -1301,15 +1346,21 @@ fn apply_modules_preset(args: &ModulesArgs) -> ModulesArgs {
         }
         ModulesPreset::NodeFull => {
             // If caller left aggregate at a non-node default, steer to node.
-            set_if(!matches!(args.aggregate, ModuleAggregate::Node), &mut |a| a.aggregate = ModuleAggregate::Node);
+            set_if(!matches!(args.aggregate, ModuleAggregate::Node), &mut |a| {
+                a.aggregate = ModuleAggregate::Node
+            });
             set_if(!args.include_fns, &mut |a| a.include_fns = true);
             set_if(!args.include_types, &mut |a| a.include_types = true);
             set_if(!args.include_traits, &mut |a| a.include_traits = true);
-            set_if(args.edge_kind == ModuleEdgeKind::Uses, &mut |a| a.edge_kind = ModuleEdgeKind::Both);
+            set_if(args.edge_kind == ModuleEdgeKind::Uses, &mut |a| {
+                a.edge_kind = ModuleEdgeKind::Both
+            });
             set_if(args.edges_top == 0, &mut |a| a.edges_top = 8);
         }
         ModulesPreset::NodeApi => {
-            set_if(!matches!(args.aggregate, ModuleAggregate::Node), &mut |a| a.aggregate = ModuleAggregate::Node);
+            set_if(!matches!(args.aggregate, ModuleAggregate::Node), &mut |a| {
+                a.aggregate = ModuleAggregate::Node
+            });
             set_if(!args.include_types, &mut |a| a.include_types = true);
             set_if(!args.include_traits, &mut |a| a.include_traits = true);
             // keep fns hidden
@@ -1330,7 +1381,11 @@ struct ModulesCacheMeta {
     key: String,
 }
 
-fn cargo_modules_dot_cached(args: &ModulesArgs, cmd: &ProcessCommand, pkg: Option<&str>) -> Result<String> {
+fn cargo_modules_dot_cached(
+    args: &ModulesArgs,
+    cmd: &ProcessCommand,
+    pkg: Option<&str>,
+) -> Result<String> {
     // Cache root defaults to `<workspace_root>/evals/pkgrank/modules_cache`.
     // If manifest_path is a workspace root, this keeps cache co-located with other pkgrank artifacts.
     let workspace_root = args
@@ -1398,7 +1453,11 @@ fn cargo_modules_dot_cached(args: &ModulesArgs, cmd: &ProcessCommand, pkg: Optio
         cmd: format!("{:?}", cmd),
         key,
     };
-    fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap_or_default()).ok();
+    fs::write(
+        &meta_path,
+        serde_json::to_string_pretty(&meta).unwrap_or_default(),
+    )
+    .ok();
 
     Ok(dot)
 }
@@ -1409,8 +1468,13 @@ fn run_cargo_modules_dot(cmd: &ProcessCommand) -> Result<String> {
     let mut cmd2 = ProcessCommand::new(program);
     cmd2.args(cmd.get_args());
     cmd2.envs(cmd.get_envs().filter_map(|(k, v)| v.map(|vv| (k, vv))));
-    cmd2.current_dir(cmd.get_current_dir().unwrap_or_else(|| std::path::Path::new(".")));
-    let out = cmd2.output().with_context(|| format!("failed to spawn: {:?}", cmd))?;
+    cmd2.current_dir(
+        cmd.get_current_dir()
+            .unwrap_or_else(|| std::path::Path::new(".")),
+    );
+    let out = cmd2
+        .output()
+        .with_context(|| format!("failed to spawn: {:?}", cmd))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(anyhow!(
@@ -1442,7 +1506,10 @@ fn print_modules_text(
     let mut sorted: Vec<&ModuleRow> = rows.iter().collect();
     sorted.sort_by(|a, b| match args.metric {
         Metric::Pagerank => b.pagerank.partial_cmp(&a.pagerank).unwrap(),
-        Metric::ConsumersPagerank => b.consumers_pagerank.partial_cmp(&a.consumers_pagerank).unwrap(),
+        Metric::ConsumersPagerank => b
+            .consumers_pagerank
+            .partial_cmp(&a.consumers_pagerank)
+            .unwrap(),
         Metric::Indegree => b.in_degree.cmp(&a.in_degree),
         Metric::Outdegree => b.out_degree.cmp(&a.out_degree),
         Metric::Betweenness => b.betweenness.partial_cmp(&a.betweenness).unwrap(),
@@ -1538,10 +1605,15 @@ fn print_modules_text(
 fn owning_module(node: &str) -> String {
     // Best-effort: for `crate::mod::Item`, owner module is `crate::mod`.
     // For a crate root `crate`, owner is itself.
-    node.rsplit_once("::").map(|(p, _)| p.to_string()).unwrap_or_else(|| node.to_string())
+    node.rsplit_once("::")
+        .map(|(p, _)| p.to_string())
+        .unwrap_or_else(|| node.to_string())
 }
 
-fn contract_graph<F>(g: &DiGraph<String, f64>, key_fn: F) -> (DiGraph<String, f64>, HashMap<String, Vec<String>>)
+fn contract_graph<F>(
+    g: &DiGraph<String, f64>,
+    key_fn: F,
+) -> (DiGraph<String, f64>, HashMap<String, Vec<String>>)
 where
     F: Fn(&str) -> String,
 {
@@ -1623,7 +1695,12 @@ fn infer_rust_crate_root_file(crate_dir: &Path, args: &ModulesArgs, _crate_name:
     src.join("main.rs")
 }
 
-fn module_to_file_key(crate_dir: &Path, crate_name: &str, root_file: &Path, module: &str) -> String {
+fn module_to_file_key(
+    crate_dir: &Path,
+    crate_name: &str,
+    root_file: &Path,
+    module: &str,
+) -> String {
     // Best-effort mapping of module path to a source file path.
     // If mapping fails, we fall back to the root file, then to "<unknown>".
     let src = crate_dir.join("src");
@@ -1633,7 +1710,9 @@ fn module_to_file_key(crate_dir: &Path, crate_name: &str, root_file: &Path, modu
     }
 
     // strip leading "<crate_name>::"
-    let rel = module.strip_prefix(&format!("{crate_name}::")).unwrap_or(module);
+    let rel = module
+        .strip_prefix(&format!("{crate_name}::"))
+        .unwrap_or(module);
     let segs: Vec<&str> = rel.split("::").filter(|s| !s.is_empty()).collect();
     if segs.is_empty() {
         return rel_path_display(crate_dir, root_file);
@@ -1675,7 +1754,10 @@ fn resolve_package_dir(workspace_manifest: &Path, package_name: &str) -> Option<
     let mut cmd = MetadataCommand::new();
     cmd.manifest_path(workspace_manifest);
     let md = cmd.exec().ok()?;
-    let pkg = md.packages.iter().find(|p| p.name.as_str() == package_name)?;
+    let pkg = md
+        .packages
+        .iter()
+        .find(|p| p.name.as_str() == package_name)?;
     let mp = PathBuf::from(pkg.manifest_path.to_string());
     mp.parent().map(|p| p.to_path_buf())
 }
@@ -1690,7 +1772,11 @@ struct ParsedEdge {
 fn parse_cargo_modules_dot(
     dot: &str,
     edge_kind: ModuleEdgeKind,
-) -> (Vec<String>, Vec<ParsedEdge>, HashMap<String, CargoModulesNodeMeta>) {
+) -> (
+    Vec<String>,
+    Vec<ParsedEdge>,
+    HashMap<String, CargoModulesNodeMeta>,
+) {
     // cargo-modules prints DOT with quoted node IDs:
     //   "a::b" -> "c::d" [label="uses", ...] ...
     //
@@ -1720,7 +1806,11 @@ fn parse_cargo_modules_dot(
         }
 
         // Node line: `"foo::bar" [label="pub(crate) struct|Bar", ...];`
-        if line.starts_with('"') && line.contains(" [label=\"") && line.contains("];") && !line.contains("->") {
+        if line.starts_with('"')
+            && line.contains(" [label=\"")
+            && line.contains("];")
+            && !line.contains("->")
+        {
             if let Some((id, m)) = parse_cargo_modules_node_line(line) {
                 meta.insert(id.clone(), m);
                 // Ensure isolated nodes are included (cargo-modules prints nodes even if they have no edges).
@@ -1743,15 +1833,21 @@ fn parse_cargo_modules_dot(
 
         // Find the target quoted string after ->
         let after_src = &rest[e1 + 1..];
-        let Some(arrow) = after_src.find("->") else { continue };
+        let Some(arrow) = after_src.find("->") else {
+            continue;
+        };
         let after_arrow = &after_src[arrow + 2..];
-        let Some(s2q) = after_arrow.find('"') else { continue };
+        let Some(s2q) = after_arrow.find('"') else {
+            continue;
+        };
         let rest2 = &after_arrow[s2q + 1..];
         let Some(e2) = rest2.find('"') else { continue };
         let target = &rest2[..e2];
 
         // Parse label="uses"/"owns"
-        let Some(li) = line.find("label=\"") else { continue };
+        let Some(li) = line.find("label=\"") else {
+            continue;
+        };
         let restl = &line[li + "label=\"".len()..];
         let Some(le) = restl.find('"') else { continue };
         let label = &restl[..le];
@@ -1767,7 +1863,11 @@ fn parse_cargo_modules_dot(
 
         let u = intern(source, &mut nodes);
         let v = intern(target, &mut nodes);
-        edges.push(ParsedEdge { u, v, label: label.to_string() });
+        edges.push(ParsedEdge {
+            u,
+            v,
+            label: label.to_string(),
+        });
     }
 
     // Convert HashMap to Vec in index order.
@@ -1782,24 +1882,44 @@ fn parse_cargo_modules_dot(
 fn parse_cargo_modules_node_line(line: &str) -> Option<(String, CargoModulesNodeMeta)> {
     // Example:
     //   "pkgrank::AnalyzeArgs" [label="pub(crate) struct|AnalyzeArgs", ...]; // "struct" node
-    let Some(s1) = line.find('"') else { return None };
+    let Some(s1) = line.find('"') else {
+        return None;
+    };
     let rest = &line[s1 + 1..];
-    let Some(e1) = rest.find('"') else { return None };
+    let Some(e1) = rest.find('"') else {
+        return None;
+    };
     let id = rest[..e1].to_string();
 
-    let Some(li) = line.find("label=\"") else { return None };
+    let Some(li) = line.find("label=\"") else {
+        return None;
+    };
     let restl = &line[li + "label=\"".len()..];
-    let Some(le) = restl.find('"') else { return None };
+    let Some(le) = restl.find('"') else {
+        return None;
+    };
     let label = &restl[..le];
     // label is "crate|pkgrank" OR "pub(crate) struct|AnalyzeArgs"
     let (header, _body) = label.split_once('|').unwrap_or((label, ""));
     let header = header.trim();
     if header.is_empty() {
-        return Some((id, CargoModulesNodeMeta { kind: None, visibility: None }));
+        return Some((
+            id,
+            CargoModulesNodeMeta {
+                kind: None,
+                visibility: None,
+            },
+        ));
     }
     let parts: Vec<&str> = header.split_whitespace().collect();
     if parts.is_empty() {
-        return Some((id, CargoModulesNodeMeta { kind: None, visibility: None }));
+        return Some((
+            id,
+            CargoModulesNodeMeta {
+                kind: None,
+                visibility: None,
+            },
+        ));
     }
     let kind = parts.last().map(|s| s.to_string());
     let visibility = if parts.len() >= 2 {
@@ -1835,7 +1955,13 @@ fn run_analyze(args: &AnalyzeArgs) -> Result<()> {
             };
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
-        OutputFormat::Text => print_text(&rows, args.metric, args.top, graph.node_count(), graph.edge_count()),
+        OutputFormat::Text => print_text(
+            &rows,
+            args.metric,
+            args.top,
+            graph.node_count(),
+            graph.edge_count(),
+        ),
     }
 
     Ok(())
@@ -1899,8 +2025,14 @@ fn metadata_for(manifest_path: &PathBuf, args: &AnalyzeArgs) -> Result<Metadata>
 
     match (args.no_default_features, feats.is_empty()) {
         (false, true) => cmd.exec().map_err(Into::into),
-        (true, true) => cmd.features(CargoOpt::NoDefaultFeatures).exec().map_err(Into::into),
-        (false, false) => cmd.features(CargoOpt::SomeFeatures(feats)).exec().map_err(Into::into),
+        (true, true) => cmd
+            .features(CargoOpt::NoDefaultFeatures)
+            .exec()
+            .map_err(Into::into),
+        (false, false) => cmd
+            .features(CargoOpt::SomeFeatures(feats))
+            .exec()
+            .map_err(Into::into),
         (true, false) => {
             // `cargo_metadata` does not support "no-default-features + some features"
             // in one CargoOpt. Cargo itself supports it, so we shell out and parse.
@@ -1910,10 +2042,16 @@ fn metadata_for(manifest_path: &PathBuf, args: &AnalyzeArgs) -> Result<Metadata>
             cmd.arg("--no-default-features");
             cmd.arg("--features");
             cmd.arg(feats.join(","));
-            let out = cmd.output().with_context(|| format!("failed to spawn: {:?}", cmd))?;
+            let out = cmd
+                .output()
+                .with_context(|| format!("failed to spawn: {:?}", cmd))?;
             if !out.status.success() {
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                return Err(anyhow!("cargo metadata failed (exit={:?}): {}", out.status.code(), stderr.trim()));
+                return Err(anyhow!(
+                    "cargo metadata failed (exit={:?}): {}",
+                    out.status.code(),
+                    stderr.trim()
+                ));
             }
             let md: Metadata = serde_json::from_slice(&out.stdout)
                 .with_context(|| "failed to parse `cargo metadata` JSON output")?;
@@ -2026,7 +2164,11 @@ fn compute_rows(
             // `source` is a URL-ish identifier like:
             // - registry+https://github.com/rust-lang/crates.io-index
             // - git+https://github.com/...#rev
-            let s = pkg.source.as_ref().map(|x| x.to_string()).unwrap_or_default();
+            let s = pkg
+                .source
+                .as_ref()
+                .map(|x| x.to_string())
+                .unwrap_or_default();
             if s.starts_with("registry+") {
                 PackageOrigin::Registry
             } else if s.starts_with("git+") {
@@ -2050,7 +2192,11 @@ fn compute_rows(
         });
     }
 
-    rows.sort_by(|a, b| b.pagerank.partial_cmp(&a.pagerank).unwrap_or(std::cmp::Ordering::Equal));
+    rows.sort_by(|a, b| {
+        b.pagerank
+            .partial_cmp(&a.pagerank)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     rows
 }
 
@@ -2058,7 +2204,10 @@ fn print_text(rows: &[Row], metric: Metric, top: usize, nodes: usize, edges: usi
     let mut sorted: Vec<&Row> = rows.iter().collect();
     sorted.sort_by(|a, b| match metric {
         Metric::Pagerank => b.pagerank.partial_cmp(&a.pagerank).unwrap(),
-        Metric::ConsumersPagerank => b.consumers_pagerank.partial_cmp(&a.consumers_pagerank).unwrap(),
+        Metric::ConsumersPagerank => b
+            .consumers_pagerank
+            .partial_cmp(&a.consumers_pagerank)
+            .unwrap(),
         Metric::Indegree => b.in_degree.cmp(&a.in_degree),
         Metric::Outdegree => b.out_degree.cmp(&a.out_degree),
         Metric::Betweenness => b.betweenness.partial_cmp(&a.betweenness).unwrap(),
@@ -2132,7 +2281,8 @@ fn betweenness_centrality<N>(graph: &DiGraph<N, f64>) -> Vec<f64> {
             for &v in &pred[w.index()] {
                 // sigma[w] can be 0 for disconnected nodes; guard division.
                 if sigma[w.index()] > 0.0 {
-                    delta[v.index()] += (sigma[v.index()] / sigma[w.index()]) * (1.0 + delta[w.index()]);
+                    delta[v.index()] +=
+                        (sigma[v.index()] / sigma[w.index()]) * (1.0 + delta[w.index()]);
                 }
             }
             if w != s {
@@ -2172,7 +2322,13 @@ fn git_repo_stats(repo_dir: &Path) -> GitRepoStats {
         .unwrap_or(0);
 
     let last_commit_secs = ProcessCommand::new("git")
-        .args(["-C", &repo_dir.to_string_lossy(), "log", "-1", "--format=%ct"])
+        .args([
+            "-C",
+            &repo_dir.to_string_lossy(),
+            "log",
+            "-1",
+            "--format=%ct",
+        ])
         .output()
         .ok()
         .and_then(|o| {
@@ -2559,7 +2715,10 @@ fn compute_tlc_crates(root: &Path, out_dir: &Path) -> Result<Vec<TlcCrateRow>> {
     let mut fp_index: HashMap<usize, usize> = HashMap::new();
     for i in 0..idx_to_row.len() {
         if let Some(r) = idx_to_row[i] {
-            if matches!(r.origin, PackageOrigin::WorkspaceMember | PackageOrigin::Path) {
+            if matches!(
+                r.origin,
+                PackageOrigin::WorkspaceMember | PackageOrigin::Path
+            ) {
                 fp_index.insert(i, fp_nodes.len());
                 fp_nodes.push(i);
             }
@@ -2571,12 +2730,19 @@ fn compute_tlc_crates(root: &Path, out_dir: &Path) -> Result<Vec<TlcCrateRow>> {
     let mut third_party_sets: Vec<HashSet<String>> = vec![HashSet::new(); fp_nodes.len()];
 
     for u in graph.node_indices() {
-        let Some(from_r) = idx_to_row[u.index()] else { continue };
-        let Some(&u_fp) = fp_index.get(&u.index()) else { continue };
+        let Some(from_r) = idx_to_row[u.index()] else {
+            continue;
+        };
+        let Some(&u_fp) = fp_index.get(&u.index()) else {
+            continue;
+        };
         for e in graph.edges_directed(u, Direction::Outgoing) {
             let v = e.target();
             if let Some(to_r) = idx_to_row[v.index()] {
-                if matches!(to_r.origin, PackageOrigin::WorkspaceMember | PackageOrigin::Path) {
+                if matches!(
+                    to_r.origin,
+                    PackageOrigin::WorkspaceMember | PackageOrigin::Path
+                ) {
                     if let Some(&v_fp) = fp_index.get(&v.index()) {
                         fp_edges.push((u_fp, v_fp));
                     }
@@ -2604,10 +2770,18 @@ fn compute_tlc_crates(root: &Path, out_dir: &Path) -> Result<Vec<TlcCrateRow>> {
     // so you can run L5 analysis tools *externally* on the exact same graph.
     let mut adj: HashMap<String, HashSet<String>> = HashMap::new();
     for (u, v) in &fp_edges {
-        let Some(u_node) = fp_nodes.get(*u).copied() else { continue };
-        let Some(v_node) = fp_nodes.get(*v).copied() else { continue };
-        let (Some(ur), Some(vr)) = (idx_to_row[u_node], idx_to_row[v_node]) else { continue };
-        adj.entry(ur.name.clone()).or_default().insert(vr.name.clone());
+        let Some(u_node) = fp_nodes.get(*u).copied() else {
+            continue;
+        };
+        let Some(v_node) = fp_nodes.get(*v).copied() else {
+            continue;
+        };
+        let (Some(ur), Some(vr)) = (idx_to_row[u_node], idx_to_row[v_node]) else {
+            continue;
+        };
+        adj.entry(ur.name.clone())
+            .or_default()
+            .insert(vr.name.clone());
     }
     let mut adj_out: HashMap<String, Vec<String>> = HashMap::new();
     for (k, vs) in adj {
@@ -2646,9 +2820,16 @@ fn compute_tlc_crates(root: &Path, out_dir: &Path) -> Result<Vec<TlcCrateRow>> {
     let cfg = PageRankConfig::default();
     let mut candidates: Vec<(usize, usize, usize, String)> = Vec::new(); // (fp_i, third, fp_deps, name)
     for (fp_i, &node_i) in fp_nodes.iter().enumerate() {
-        let Some(r) = idx_to_row[node_i] else { continue };
+        let Some(r) = idx_to_row[node_i] else {
+            continue;
+        };
         if fp_dependents[fp_i] == 0 && fp_deps[fp_i] > 0 {
-            candidates.push((fp_i, third_party_sets[fp_i].len(), fp_deps[fp_i], r.name.clone()));
+            candidates.push((
+                fp_i,
+                third_party_sets[fp_i].len(),
+                fp_deps[fp_i],
+                r.name.clone(),
+            ));
         }
     }
     candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.2.cmp(&a.2)));
@@ -2684,7 +2865,11 @@ fn compute_tlc_crates(root: &Path, out_dir: &Path) -> Result<Vec<TlcCrateRow>> {
                 break;
             }
         }
-        ppr_out.push(PprSeed { seed: seed_name, reachable_first_party, top });
+        ppr_out.push(PprSeed {
+            seed: seed_name,
+            reachable_first_party,
+            top,
+        });
     }
     fs::write(
         out_dir.join("ppr.entrypoints.json"),
@@ -2721,7 +2906,9 @@ fn compute_tlc_crates(root: &Path, out_dir: &Path) -> Result<Vec<TlcCrateRow>> {
     let mut tlc = Vec::new();
     let mut git_by_repo: HashMap<String, GitRepoStats> = HashMap::new();
     for (fp_i, &node_i) in fp_nodes.iter().enumerate() {
-        let Some(r) = idx_to_row[node_i] else { continue };
+        let Some(r) = idx_to_row[node_i] else {
+            continue;
+        };
         let depnt = fp_dependents[fp_i];
         let deps = fp_deps[fp_i];
         let third = third_party_sets[fp_i].len();
@@ -2778,12 +2965,22 @@ fn compute_tlc_crates(root: &Path, out_dir: &Path) -> Result<Vec<TlcCrateRow>> {
         });
     }
 
-    tlc.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-    fs::write(out_dir.join("tlc.crates.json"), serde_json::to_string_pretty(&tlc)?)?;
+    tlc.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    fs::write(
+        out_dir.join("tlc.crates.json"),
+        serde_json::to_string_pretty(&tlc)?,
+    )?;
     Ok(tlc)
 }
 
-fn compute_repo_graph_from_live_metadata(root: &Path, out_dir: &Path) -> Result<(Vec<RepoRow>, RepoAxesSummary)> {
+fn compute_repo_graph_from_live_metadata(
+    root: &Path,
+    out_dir: &Path,
+) -> Result<(Vec<RepoRow>, RepoAxesSummary)> {
     // Critique of the old approach:
     // - Using `repo_dependency_edges` was a derived artifact that can drift/stale.
     // - Collapsing A->B edges with `update_edge` silently threw away multiplicity.
@@ -2864,7 +3061,10 @@ fn compute_repo_graph_from_live_metadata(root: &Path, out_dir: &Path) -> Result<
         let mp = PathBuf::from(pkg.manifest_path.to_string());
         let repo = infer_repo_for_manifest(root, &mp.to_string_lossy());
         repo_for_pkg.insert(id, repo.clone());
-        pkgs_in_repo.entry(repo).or_default().push(pkg.name.to_string());
+        pkgs_in_repo
+            .entry(repo)
+            .or_default()
+            .push(pkg.name.to_string());
     }
 
     // Repo axis mass: count how many packages in each repo are in each axis.
@@ -2872,7 +3072,10 @@ fn compute_repo_graph_from_live_metadata(root: &Path, out_dir: &Path) -> Result<
     for (repo, pkgs) in &pkgs_in_repo {
         let mut m: HashMap<String, usize> = HashMap::new();
         for p in pkgs {
-            let axis = token_axis.get(p).cloned().unwrap_or_else(|| "other".to_string());
+            let axis = token_axis
+                .get(p)
+                .cloned()
+                .unwrap_or_else(|| "other".to_string());
             *m.entry(axis).or_insert(0) += 1;
         }
         repo_axis_mass.insert(repo.clone(), m);
@@ -2886,7 +3089,10 @@ fn compute_repo_graph_from_live_metadata(root: &Path, out_dir: &Path) -> Result<
         if !local_pkg_ids.contains(&node.id) {
             continue;
         }
-        let from_repo = repo_for_pkg.get(&node.id).cloned().unwrap_or_else(|| "unknown".to_string());
+        let from_repo = repo_for_pkg
+            .get(&node.id)
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
         for dep in &node.deps {
             if !dep_kind_allowed(&dep.dep_kinds, &analyze) {
                 continue;
@@ -2907,7 +3113,10 @@ fn compute_repo_graph_from_live_metadata(root: &Path, out_dir: &Path) -> Result<
                 }
                 continue;
             }
-            let to_repo = repo_for_pkg.get(dep_id).cloned().unwrap_or_else(|| "unknown".to_string());
+            let to_repo = repo_for_pkg
+                .get(dep_id)
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string());
             if from_repo == to_repo {
                 continue;
             }
@@ -2977,7 +3186,10 @@ fn compute_repo_graph_from_live_metadata(root: &Path, out_dir: &Path) -> Result<
             .edges_directed(i, Direction::Outgoing)
             .map(|e| *e.weight())
             .sum();
-        let axis = axis_by_repo.get(r).cloned().unwrap_or_else(|| "other".to_string());
+        let axis = axis_by_repo
+            .get(r)
+            .cloned()
+            .unwrap_or_else(|| "other".to_string());
         let consumers = consumers_pr[idx2[r].index()];
         let third = repo_third_party.get(r).map(|s| s.len()).unwrap_or(0);
         let gs = git_by_repo.get(r).copied().unwrap_or_default();
@@ -2997,7 +3209,11 @@ fn compute_repo_graph_from_live_metadata(root: &Path, out_dir: &Path) -> Result<
             git_days_since_last_commit: gs.days_since_last_commit,
         });
     }
-    rows.sort_by(|a, b| b.pagerank.partial_cmp(&a.pagerank).unwrap_or(std::cmp::Ordering::Equal));
+    rows.sort_by(|a, b| {
+        b.pagerank
+            .partial_cmp(&a.pagerank)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Axis totals for depends_pr.
     let mut totals: HashMap<String, f64> = HashMap::new();
@@ -3016,8 +3232,14 @@ fn compute_repo_graph_from_live_metadata(root: &Path, out_dir: &Path) -> Result<
     // but it’s still worth surfacing separately later.)
     let mut violations: Vec<RepoInvariantViolation> = Vec::new();
     for ((a, b), w) in &edge_w {
-        let ax = axis_by_repo.get(a).cloned().unwrap_or_else(|| "other".to_string());
-        let bx = axis_by_repo.get(b).cloned().unwrap_or_else(|| "other".to_string());
+        let ax = axis_by_repo
+            .get(a)
+            .cloned()
+            .unwrap_or_else(|| "other".to_string());
+        let bx = axis_by_repo
+            .get(b)
+            .cloned()
+            .unwrap_or_else(|| "other".to_string());
 
         let tekne_forbidden = ax == "tekne" && (bx == "agents" || bx == "governance");
         let governance_forbidden = ax == "governance" && bx == "agents";
@@ -3049,7 +3271,9 @@ fn compute_repo_graph_from_live_metadata(root: &Path, out_dir: &Path) -> Result<
     // TLC for repos: central + boundary-heavy + violations.
     let mut violation_weight_by_repo: HashMap<String, usize> = HashMap::new();
     for v in &violations {
-        *violation_weight_by_repo.entry(v.from_repo.clone()).or_insert(0) += v.weight;
+        *violation_weight_by_repo
+            .entry(v.from_repo.clone())
+            .or_insert(0) += v.weight;
     }
     let mut tlc_repos: Vec<TlcRepoRow> = Vec::new();
     for r in &rows {
@@ -3095,11 +3319,21 @@ fn compute_repo_graph_from_live_metadata(root: &Path, out_dir: &Path) -> Result<
             git_days_since_last_commit: r.git_days_since_last_commit,
         });
     }
-    tlc_repos.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    tlc_repos.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Write artifacts including both PR directions.
-    fs::write(out_dir.join("ecosystem.repo_graph.rows.json"), serde_json::to_string_pretty(&rows)?)?;
-    fs::write(out_dir.join("ecosystem.axes.pagerank.json"), serde_json::to_string_pretty(&axes_summary)?)?;
+    fs::write(
+        out_dir.join("ecosystem.repo_graph.rows.json"),
+        serde_json::to_string_pretty(&rows)?,
+    )?;
+    fs::write(
+        out_dir.join("ecosystem.axes.pagerank.json"),
+        serde_json::to_string_pretty(&axes_summary)?,
+    )?;
     fs::write(
         out_dir.join("ecosystem.invariants.violations.json"),
         serde_json::to_string_pretty(&violations)?,
@@ -3167,7 +3401,10 @@ struct RecentFilesSummary {
 }
 
 fn should_skip_dir_name(name: &str) -> bool {
-    matches!(name, ".git" | "target" | "node_modules" | ".venv" | "__pycache__")
+    matches!(
+        name,
+        ".git" | "target" | "node_modules" | ".venv" | "__pycache__"
+    )
 }
 
 fn write_recent_files_artifacts(
@@ -3288,7 +3525,11 @@ fn write_recent_files_artifacts(
 
                 let rel = path.strip_prefix(root).ok();
                 let repo = rel
-                    .and_then(|rp| rp.components().next().map(|c| c.as_os_str().to_string_lossy().to_string()))
+                    .and_then(|rp| {
+                        rp.components()
+                            .next()
+                            .map(|c| c.as_os_str().to_string_lossy().to_string())
+                    })
                     .unwrap_or_else(|| "<outside-root>".to_string());
 
                 // Find owning crate via longest prefix match.
@@ -3351,13 +3592,22 @@ fn write_recent_files_artifacts(
         by_crate,
     };
 
-    fs::write(out_dir.join("recent.files.json"), serde_json::to_string_pretty(&out)?)?;
-    fs::write(out_dir.join("recent.summary.json"), serde_json::to_string_pretty(&summary)?)?;
+    fs::write(
+        out_dir.join("recent.files.json"),
+        serde_json::to_string_pretty(&out)?,
+    )?;
+    fs::write(
+        out_dir.join("recent.summary.json"),
+        serde_json::to_string_pretty(&summary)?,
+    )?;
     Ok(())
 }
 
 fn run_sweep_local(args: &SweepLocalArgs) -> Result<()> {
-    let root = args.root.canonicalize().unwrap_or_else(|_| args.root.clone());
+    let root = args
+        .root
+        .canonicalize()
+        .unwrap_or_else(|_| args.root.clone());
     let out_dir = root.join(&args.out);
     fs::create_dir_all(&out_dir)
         .with_context(|| format!("failed to create output dir {}", out_dir.display()))?;
@@ -3405,8 +3655,13 @@ fn run_sweep_local(args: &SweepLocalArgs) -> Result<()> {
                     Ok(rp) => rp,
                     Err(_) => continue,
                 };
-                let repo = rel.components().next().map(|c| c.as_os_str().to_string_lossy().to_string());
-                let Some(repo) = repo else { continue; };
+                let repo = rel
+                    .components()
+                    .next()
+                    .map(|c| c.as_os_str().to_string_lossy().to_string());
+                let Some(repo) = repo else {
+                    continue;
+                };
                 by_repo.entry(repo).or_default().push(r);
             }
 
@@ -3415,10 +3670,17 @@ fn run_sweep_local(args: &SweepLocalArgs) -> Result<()> {
             repos.sort();
             for repo in repos {
                 let mut rows = by_repo.remove(&repo).unwrap_or_default();
-                rows.sort_by(|a, b| b.pagerank.partial_cmp(&a.pagerank).unwrap_or(std::cmp::Ordering::Equal));
+                rows.sort_by(|a, b| {
+                    b.pagerank
+                        .partial_cmp(&a.pagerank)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
                 let mut lines = Vec::new();
                 lines.push(format!("{}: {} workspace crates", repo, rows.len()));
-                lines.push("------------------------------------------------------------------------".to_string());
+                lines.push(
+                    "------------------------------------------------------------------------"
+                        .to_string(),
+                );
                 for (i, r) in rows.iter().take(args.top).enumerate() {
                     lines.push(format!(
                         "{:3}. {:28} [{:>12}] in={:2} out={:2} pr={:.6}",
@@ -3430,7 +3692,10 @@ fn run_sweep_local(args: &SweepLocalArgs) -> Result<()> {
                         r.pagerank
                     ));
                 }
-                fs::write(out_dir.join(format!("{}.top{}.txt", repo, args.top)), lines.join("\n") + "\n")?;
+                fs::write(
+                    out_dir.join(format!("{}.top{}.txt", repo, args.top)),
+                    lines.join("\n") + "\n",
+                )?;
                 summary.ok.push(repo);
             }
         }
@@ -3496,7 +3761,11 @@ fn run_sweep_local(args: &SweepLocalArgs) -> Result<()> {
                         // Small text file too.
                         let mut lines = Vec::new();
                         let mut sorted = rows.clone();
-                        sorted.sort_by(|a, b| b.pagerank.partial_cmp(&a.pagerank).unwrap_or(std::cmp::Ordering::Equal));
+                        sorted.sort_by(|a, b| {
+                            b.pagerank
+                                .partial_cmp(&a.pagerank)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        });
                         lines.push(format!("{}: {} workspace crates", repo, sorted.len()));
                         lines.push("------------------------------------------------------------------------".to_string());
                         for (i, r) in sorted.iter().take(args.top).enumerate() {
@@ -3510,18 +3779,27 @@ fn run_sweep_local(args: &SweepLocalArgs) -> Result<()> {
                                 r.pagerank
                             ));
                         }
-                        fs::write(out_dir.join(format!("{}.top{}.txt", repo, args.top)), lines.join("\n") + "\n")?;
+                        fs::write(
+                            out_dir.join(format!("{}.top{}.txt", repo, args.top)),
+                            lines.join("\n") + "\n",
+                        )?;
                         summary.ok.push(repo);
                     }
                     Err(e) => {
-                        summary.failed.push(SweepFailure { repo, error: format!("{:#}", e) });
+                        summary.failed.push(SweepFailure {
+                            repo,
+                            error: format!("{:#}", e),
+                        });
                     }
                 }
             }
         }
     }
 
-    fs::write(out_dir.join("sweep.summary.json"), serde_json::to_string_pretty(&summary)?)?;
+    fs::write(
+        out_dir.join("sweep.summary.json"),
+        serde_json::to_string_pretty(&summary)?,
+    )?;
 
     // Optional: “recently modified files” view (mtime-based, bounded scan).
     // This is an intentionally git-free signal: the dev folder is a super-workspace.
@@ -3598,7 +3876,11 @@ fn parse_aggregate(s: &str) -> Result<ModuleAggregate, McpError> {
 #[cfg(feature = "stdio")]
 fn modules_args_from_tool_params(p: &PkgrankModulesToolArgs) -> Result<ModulesArgs, McpError> {
     let mut args = ModulesArgs {
-        manifest_path: PathBuf::from(p.manifest_path.clone().unwrap_or_else(|| "Cargo.toml".to_string())),
+        manifest_path: PathBuf::from(
+            p.manifest_path
+                .clone()
+                .unwrap_or_else(|| "Cargo.toml".to_string()),
+        ),
         package: p.package.clone(),
         lib: p.lib.unwrap_or(false),
         bin: p.bin.clone(),
@@ -3662,10 +3944,16 @@ fn modules_args_from_tool_params(p: &PkgrankModulesToolArgs) -> Result<ModulesAr
 }
 
 #[cfg(feature = "stdio")]
-fn modules_sweep_args_from_tool_params(p: &PkgrankModulesSweepToolArgs) -> Result<ModulesSweepArgs, McpError> {
+fn modules_sweep_args_from_tool_params(
+    p: &PkgrankModulesSweepToolArgs,
+) -> Result<ModulesSweepArgs, McpError> {
     let packages = p.packages.clone().unwrap_or_default();
     Ok(ModulesSweepArgs {
-        manifest_path: PathBuf::from(p.manifest_path.clone().unwrap_or_else(|| "Cargo.toml".to_string())),
+        manifest_path: PathBuf::from(
+            p.manifest_path
+                .clone()
+                .unwrap_or_else(|| "Cargo.toml".to_string()),
+        ),
         package: packages,
         all_packages: p.all_packages.unwrap_or(false),
         lib: p.lib.unwrap_or(false),
@@ -3724,16 +4012,26 @@ fn modules_sweep_payload(
     } else if args.all_packages {
         let mut cmd = MetadataCommand::new();
         cmd.manifest_path(&args.manifest_path);
-        let md = cmd.exec().map_err(|e| anyhow!(e)).with_context(|| "cargo metadata failed for modules-sweep")?;
+        let md = cmd
+            .exec()
+            .map_err(|e| anyhow!(e))
+            .with_context(|| "cargo metadata failed for modules-sweep")?;
         let mut names: Vec<String> = md
             .workspace_members
             .iter()
-            .filter_map(|id| md.packages.iter().find(|p| &p.id == id).map(|p| p.name.to_string()))
+            .filter_map(|id| {
+                md.packages
+                    .iter()
+                    .find(|p| &p.id == id)
+                    .map(|p| p.name.to_string())
+            })
             .collect();
         names.sort();
         names
     } else {
-        return Err(anyhow!("modules-sweep requires at least one package, or all_packages=true"));
+        return Err(anyhow!(
+            "modules-sweep requires at least one package, or all_packages=true"
+        ));
     };
 
     let template = apply_modules_preset(&ModulesArgs {
@@ -3766,7 +4064,11 @@ fn modules_sweep_payload(
         include_types: args.include_types,
     });
 
-    let continue_on_error = if args.fail_fast { false } else { args.continue_on_error };
+    let continue_on_error = if args.fail_fast {
+        false
+    } else {
+        args.continue_on_error
+    };
 
     let mut out_pkgs = serde_json::Map::new();
     for pkg in packages {
@@ -3776,7 +4078,11 @@ fn modules_sweep_payload(
             Ok((mut rows, nodes, edges, aggregate_label, top_edges)) => {
                 let top_pr = rows
                     .iter()
-                    .max_by(|a, b| a.pagerank.partial_cmp(&b.pagerank).unwrap_or(std::cmp::Ordering::Equal))
+                    .max_by(|a, b| {
+                        a.pagerank
+                            .partial_cmp(&b.pagerank)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
                     .map(|r| serde_json::json!({"node": r.node, "score": r.pagerank}));
                 let top_cons = rows
                     .iter()
@@ -3788,19 +4094,29 @@ fn modules_sweep_payload(
                     .map(|r| serde_json::json!({"node": r.node, "score": r.consumers_pagerank}));
                 let top_between = rows
                     .iter()
-                    .max_by(|a, b| a.betweenness.partial_cmp(&b.betweenness).unwrap_or(std::cmp::Ordering::Equal))
+                    .max_by(|a, b| {
+                        a.betweenness
+                            .partial_cmp(&b.betweenness)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
                     .map(|r| serde_json::json!({"node": r.node, "score": r.betweenness}));
 
                 // Respect top: sort by requested metric and truncate.
                 rows.sort_by(|a, b| match args.metric {
-                    Metric::Pagerank => b.pagerank.partial_cmp(&a.pagerank).unwrap_or(std::cmp::Ordering::Equal),
+                    Metric::Pagerank => b
+                        .pagerank
+                        .partial_cmp(&a.pagerank)
+                        .unwrap_or(std::cmp::Ordering::Equal),
                     Metric::ConsumersPagerank => b
                         .consumers_pagerank
                         .partial_cmp(&a.consumers_pagerank)
                         .unwrap_or(std::cmp::Ordering::Equal),
                     Metric::Indegree => b.in_degree.cmp(&a.in_degree),
                     Metric::Outdegree => b.out_degree.cmp(&a.out_degree),
-                    Metric::Betweenness => b.betweenness.partial_cmp(&a.betweenness).unwrap_or(std::cmp::Ordering::Equal),
+                    Metric::Betweenness => b
+                        .betweenness
+                        .partial_cmp(&a.betweenness)
+                        .unwrap_or(std::cmp::Ordering::Equal),
                 });
                 if include_rows {
                     rows.truncate(args.top);
@@ -3825,7 +4141,8 @@ fn modules_sweep_payload(
             }
             Err(e) => {
                 if !continue_on_error {
-                    return Err(e).with_context(|| format!("modules-sweep failed for package `{pkg}`"));
+                    return Err(e)
+                        .with_context(|| format!("modules-sweep failed for package `{pkg}`"));
                 }
                 out_pkgs.insert(
                     pkg,
@@ -3936,7 +4253,10 @@ struct CratesIoDep {
 }
 
 fn run_cratesio(args: &CratesIoArgs) -> Result<()> {
-    let root = args.root.canonicalize().unwrap_or_else(|_| args.root.clone());
+    let root = args
+        .root
+        .canonicalize()
+        .unwrap_or_else(|_| args.root.clone());
     let out_dir = root.join(&args.out);
     fs::create_dir_all(&out_dir)
         .with_context(|| format!("failed to create output dir {}", out_dir.display()))?;
@@ -3980,7 +4300,9 @@ fn run_cratesio(args: &CratesIoArgs) -> Result<()> {
 
     while let Some((name, depth)) = q.pop_front() {
         // Ensure node exists.
-        let from = *node_idx.entry(name.clone()).or_insert_with(|| graph.add_node(name.clone()));
+        let from = *node_idx
+            .entry(name.clone())
+            .or_insert_with(|| graph.add_node(name.clone()));
 
         if depth >= args.depth {
             continue;
@@ -3991,7 +4313,10 @@ fn run_cratesio(args: &CratesIoArgs) -> Result<()> {
             Ok(v) => v,
             Err(_) => continue, // not on crates.io; skip
         };
-        let deps: DepsResponse = match client.get_json(&format!("crates/{}/{}/dependencies", name, info.krate.max_version)) {
+        let deps: DepsResponse = match client.get_json(&format!(
+            "crates/{}/{}/dependencies",
+            name, info.krate.max_version
+        )) {
             Ok(v) => v,
             Err(_) => continue,
         };
@@ -4011,7 +4336,9 @@ fn run_cratesio(args: &CratesIoArgs) -> Result<()> {
             }
 
             let to_name = d.crate_id;
-            let to = *node_idx.entry(to_name.clone()).or_insert_with(|| graph.add_node(to_name.clone()));
+            let to = *node_idx
+                .entry(to_name.clone())
+                .or_insert_with(|| graph.add_node(to_name.clone()));
             graph.update_edge(from, to, 1.0);
 
             if seen.insert(to_name.clone()) {
@@ -4047,13 +4374,23 @@ fn run_cratesio(args: &CratesIoArgs) -> Result<()> {
             betweenness: bc[node.index()],
         });
     }
-    rows.sort_by(|a, b| b.pagerank.partial_cmp(&a.pagerank).unwrap_or(std::cmp::Ordering::Equal));
+    rows.sort_by(|a, b| {
+        b.pagerank
+            .partial_cmp(&a.pagerank)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     match args.format {
         OutputFormat::Json => {
             // Stable artifact name.
-            fs::write(out_dir.join("cratesio.rows.json"), serde_json::to_string_pretty(&rows)?)?;
-            fs::write(out_dir.join("cratesio.seeds.json"), serde_json::to_string_pretty(&seeds)?)?;
+            fs::write(
+                out_dir.join("cratesio.rows.json"),
+                serde_json::to_string_pretty(&rows)?,
+            )?;
+            fs::write(
+                out_dir.join("cratesio.seeds.json"),
+                serde_json::to_string_pretty(&seeds)?,
+            )?;
             if !args.quiet {
                 #[derive(Serialize)]
                 struct CratesIoJsonOut<'a> {
@@ -4075,7 +4412,11 @@ fn run_cratesio(args: &CratesIoArgs) -> Result<()> {
         }
         OutputFormat::Text => {
             if !args.quiet {
-                println!("crates.io graph: {} nodes, {} edges", graph.node_count(), graph.edge_count());
+                println!(
+                    "crates.io graph: {} nodes, {} edges",
+                    graph.node_count(),
+                    graph.edge_count()
+                );
                 println!("seeds ({}): {}", seeds.len(), seeds.join(", "));
                 println!("{:─<72}", "");
                 for (i, r) in rows.iter().take(25).enumerate() {
@@ -4098,8 +4439,15 @@ fn run_cratesio(args: &CratesIoArgs) -> Result<()> {
 }
 
 fn run_view(args: &ViewArgs) -> Result<()> {
-    let root = args.root.canonicalize().unwrap_or_else(|_| args.root.clone());
-    let out_dir = if args.out.is_absolute() { args.out.clone() } else { root.join(&args.out) };
+    let root = args
+        .root
+        .canonicalize()
+        .unwrap_or_else(|_| args.root.clone());
+    let out_dir = if args.out.is_absolute() {
+        args.out.clone()
+    } else {
+        root.join(&args.out)
+    };
     fs::create_dir_all(&out_dir)
         .with_context(|| format!("failed to create output dir {}", out_dir.display()))?;
 
@@ -4163,12 +4511,16 @@ fn run_view(args: &ViewArgs) -> Result<()> {
     let cratesio_rows_path = out_dir.join("cratesio.rows.json");
 
     let local_summary: Option<serde_json::Value> = if local_summary_path.exists() {
-        Some(serde_json::from_str(&fs::read_to_string(&local_summary_path)?)?)
+        Some(serde_json::from_str(&fs::read_to_string(
+            &local_summary_path,
+        )?)?)
     } else {
         None
     };
     let cratesio_rows: Option<Vec<serde_json::Value>> = if cratesio_rows_path.exists() {
-        Some(serde_json::from_str(&fs::read_to_string(&cratesio_rows_path)?)?)
+        Some(serde_json::from_str(&fs::read_to_string(
+            &cratesio_rows_path,
+        )?)?)
     } else {
         None
     };
@@ -4201,7 +4553,9 @@ fn run_view(args: &ViewArgs) -> Result<()> {
     html.push_str("</head><body>\n<header>\n<div><code>pkgrank view</code></div>\n<div style=\"color:#3d3d3d;font-size:12px;margin-top:4px;\">Local (Cargo metadata) + crates.io (bounded crawl). No .gitignore / ignore-file walking is used; inputs are Cargo manifests and explicit repo lists.</div>\n<div style=\"margin-top:8px;font-size:12px;display:flex;gap:10px;flex-wrap:wrap;\">\n<a href=\"#local-per-repo\">local per-repo</a>\n<a href=\"#local-whole\">local whole-graph</a>\n<a href=\"#tlc-crates\">tlc crates</a>\n<a href=\"#ppr\">ppr</a>\n<a href=\"#ecosystem\">ecosystem</a>\n<a href=\"#cratesio\">crates.io</a>\n</div>\n</header>\n<main>\n");
 
     if let Some(v) = local_summary {
-        html.push_str("<section id=\"local-per-repo\"><h2>Local: per-repo top crates (PageRank)</h2>\n");
+        html.push_str(
+            "<section id=\"local-per-repo\"><h2>Local: per-repo top crates (PageRank)</h2>\n",
+        );
         html.push_str("<p><code>evals/pkgrank/by_repo.summary.json</code></p>\n");
         html.push_str("<table><thead><tr><th>repo</th><th>count</th><th>top (name → pagerank)</th></tr></thead><tbody>\n");
         if let Some(obj) = v.as_object() {
@@ -4216,11 +4570,16 @@ fn run_view(args: &ViewArgs) -> Result<()> {
                     for (i, item) in arr.iter().take(args.local_top).enumerate() {
                         let name = item.get("name").and_then(|x| x.as_str()).unwrap_or("?");
                         let pr = item.get("pagerank").and_then(|x| x.as_f64()).unwrap_or(0.0);
-                        if i > 0 { top.push_str(", "); }
+                        if i > 0 {
+                            top.push_str(", ");
+                        }
                         top.push_str(&format!("{}→{:.4}", name, pr));
                     }
                 }
-                html.push_str(&format!("<tr><td><code>{}</code></td><td><code>{}</code></td><td>{}</td></tr>\n", k, count, top));
+                html.push_str(&format!(
+                    "<tr><td><code>{}</code></td><td><code>{}</code></td><td>{}</td></tr>\n",
+                    k, count, top
+                ));
             }
         }
         html.push_str("</tbody></table></section>\n");
@@ -4231,7 +4590,9 @@ fn run_view(args: &ViewArgs) -> Result<()> {
     if recent_path.exists() {
         if let Ok(raw) = fs::read_to_string(&recent_path) {
             if let Ok(rows) = serde_json::from_str::<Vec<RecentFileRow>>(&raw) {
-                html.push_str("<section id=\"recent\"><h2>Recent: modified files (mtime; bounded)</h2>");
+                html.push_str(
+                    "<section id=\"recent\"><h2>Recent: modified files (mtime; bounded)</h2>",
+                );
                 html.push_str("<p><code>evals/pkgrank/recent.files.json</code>, <code>evals/pkgrank/recent.summary.json</code></p>");
                 html.push_str("<p>Interpretation: this is filesystem time, not Git history. It’s useful for “don’t miss context” in a super-workspace.</p>");
                 html.push_str("<table><thead><tr><th>age</th><th>repo</th><th>crate</th><th>tlc</th><th>size</th><th>path</th></tr></thead><tbody>");
@@ -4256,15 +4617,33 @@ fn run_view(args: &ViewArgs) -> Result<()> {
         // Split local full graph into first-party vs third-party.
         let mut first_party: Vec<&Row> = rows
             .iter()
-            .filter(|r| matches!(r.origin, PackageOrigin::WorkspaceMember | PackageOrigin::Path))
+            .filter(|r| {
+                matches!(
+                    r.origin,
+                    PackageOrigin::WorkspaceMember | PackageOrigin::Path
+                )
+            })
             .collect();
         let mut third_party: Vec<&Row> = rows
             .iter()
-            .filter(|r| matches!(r.origin, PackageOrigin::Registry | PackageOrigin::Git | PackageOrigin::Other))
+            .filter(|r| {
+                matches!(
+                    r.origin,
+                    PackageOrigin::Registry | PackageOrigin::Git | PackageOrigin::Other
+                )
+            })
             .collect();
 
-        first_party.sort_by(|a, b| b.pagerank.partial_cmp(&a.pagerank).unwrap_or(std::cmp::Ordering::Equal));
-        third_party.sort_by(|a, b| b.pagerank.partial_cmp(&a.pagerank).unwrap_or(std::cmp::Ordering::Equal));
+        first_party.sort_by(|a, b| {
+            b.pagerank
+                .partial_cmp(&a.pagerank)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        third_party.sort_by(|a, b| {
+            b.pagerank
+                .partial_cmp(&a.pagerank)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         html.push_str("<section id=\"local-whole\"><h2>Local: whole-graph ranking (first-party vs third-party)</h2>\n");
         html.push_str("<p>This uses <code>cargo metadata</code> on the root workspace with <code>--workspace-only=false</code>, so registry/git deps are included and labeled.</p>\n");
@@ -4306,7 +4685,10 @@ fn run_view(args: &ViewArgs) -> Result<()> {
                 html.push_str("<p>Interpretation note: high <code>dependents</code> often means “foundational; keep stable”; high <code>3p deps</code> often means “boundary-heavy; keep interfaces tight”. Treat this as triage, not a moral judgment.</p>");
                 html.push_str("<table><thead><tr><th>rank</th><th>crate</th><th>repo</th><th>axis</th><th>origin</th><th>score</th><th>deps_pr</th><th>betweenness</th><th>dependents</th><th>deps</th><th>3p deps</th><th>repo commits (30d)</th><th>repo days since</th><th>why</th></tr></thead><tbody>");
                 for (i, r) in tlc.iter().take(50).enumerate() {
-                    let readme = readme_details_html(&root, find_readme_for_manifest(&root, &r.manifest_path));
+                    let readme = readme_details_html(
+                        &root,
+                        find_readme_for_manifest(&root, &r.manifest_path),
+                    );
                     html.push_str("<tr>");
                     html.push_str(&format!("<td><code>{}</code></td>", i + 1));
                     html.push_str("<td>");
@@ -4319,8 +4701,14 @@ fn run_view(args: &ViewArgs) -> Result<()> {
                     html.push_str(&format!("<td><code>{:.2}</code></td>", r.score));
                     html.push_str(&format!("<td><code>{:.6}</code></td>", r.pagerank));
                     html.push_str(&format!("<td><code>{:.6}</code></td>", r.betweenness));
-                    html.push_str(&format!("<td><code>{}</code></td>", r.transitive_dependents));
-                    html.push_str(&format!("<td><code>{}</code></td>", r.transitive_dependencies));
+                    html.push_str(&format!(
+                        "<td><code>{}</code></td>",
+                        r.transitive_dependents
+                    ));
+                    html.push_str(&format!(
+                        "<td><code>{}</code></td>",
+                        r.transitive_dependencies
+                    ));
                     html.push_str(&format!("<td><code>{}</code></td>", r.third_party_deps));
                     match r.repo_git_commits_30d {
                         Some(v) => html.push_str(&format!("<td><code>{}</code></td>", v)),
@@ -4337,7 +4725,9 @@ fn run_view(args: &ViewArgs) -> Result<()> {
 
                 // TLC slices: show why things appear without hiding it in a combined score.
                 html.push_str("<h2>TLC slices</h2>");
-                html.push_str("<div style=\"display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;\">");
+                html.push_str(
+                    "<div style=\"display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;\">",
+                );
 
                 let mut by_dependents = tlc.clone();
                 by_dependents.sort_by(|a, b| b.transitive_dependents.cmp(&a.transitive_dependents));
@@ -4366,7 +4756,11 @@ fn run_view(args: &ViewArgs) -> Result<()> {
                 html.push_str("</tbody></table></div>");
 
                 let mut by_bridge = tlc.clone();
-                by_bridge.sort_by(|a, b| b.betweenness.partial_cmp(&a.betweenness).unwrap_or(std::cmp::Ordering::Equal));
+                by_bridge.sort_by(|a, b| {
+                    b.betweenness
+                        .partial_cmp(&a.betweenness)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
                 html.push_str("<div><h2>Bridge nodes (betweenness)</h2><table><thead><tr><th>rank</th><th>crate</th><th>betweenness</th></tr></thead><tbody>");
                 for (i, r) in by_bridge.iter().take(15).enumerate() {
                     html.push_str(&format!(
@@ -4385,12 +4779,16 @@ fn run_view(args: &ViewArgs) -> Result<()> {
                 if ppr_path.exists() {
                     if let Ok(raw) = fs::read_to_string(&ppr_path) {
                         if let Ok(v) = serde_json::from_str::<Vec<serde_json::Value>>(&raw) {
-                            html.push_str("<section id=\"ppr\"><h2>PPR: what entrypoints lean on (walk)</h2>");
+                            html.push_str(
+                                "<section id=\"ppr\"><h2>PPR: what entrypoints lean on (walk)</h2>",
+                            );
                             html.push_str("<p>Seeds are chosen heuristically (boundary-heavy crates with 0 first-party dependents). Scores approximate “influence” under a random-surfer model over dependency edges. Many crates are in disconnected components; we only show non-zero results.</p>");
                             let agg_path = out_dir.join("ppr.aggregate.json");
                             if agg_path.exists() {
                                 if let Ok(raw_agg) = fs::read_to_string(&agg_path) {
-                                    if let Ok(agg) = serde_json::from_str::<Vec<(String, f64)>>(&raw_agg) {
+                                    if let Ok(agg) =
+                                        serde_json::from_str::<Vec<(String, f64)>>(&raw_agg)
+                                    {
                                         html.push_str("<h2>PPR aggregate: shared foundations</h2>");
                                         html.push_str("<p>This sums PPR mass across the chosen seeds, filtering out the seeds and other leaf/entrypoint crates. It’s a quick proxy for “what repeatedly shows up under entrypoints”.</p>");
                                         html.push_str("<table><thead><tr><th>rank</th><th>crate</th><th>ppr_sum</th></tr></thead><tbody>");
@@ -4408,14 +4806,22 @@ fn run_view(args: &ViewArgs) -> Result<()> {
                             }
                             for seed in v.iter().take(6) {
                                 let name = seed.get("seed").and_then(|x| x.as_str()).unwrap_or("?");
-                                let reachable = seed.get("reachable_first_party").and_then(|x| x.as_u64()).unwrap_or(0);
-                                html.push_str(&format!("<h2><code>{}</code></h2>", html_escape(name)));
+                                let reachable = seed
+                                    .get("reachable_first_party")
+                                    .and_then(|x| x.as_u64())
+                                    .unwrap_or(0);
+                                html.push_str(&format!(
+                                    "<h2><code>{}</code></h2>",
+                                    html_escape(name)
+                                ));
                                 html.push_str(&format!("<p>Reachable first-party nodes (including seed): <code>{}</code></p>", reachable));
                                 html.push_str("<table><thead><tr><th>rank</th><th>crate</th><th>ppr</th></tr></thead><tbody>");
                                 if let Some(arr) = seed.get("top").and_then(|x| x.as_array()) {
                                     for (i, item) in arr.iter().take(15).enumerate() {
-                                        let crate_name = item.get(0).and_then(|x| x.as_str()).unwrap_or("?");
-                                        let score = item.get(1).and_then(|x| x.as_f64()).unwrap_or(0.0);
+                                        let crate_name =
+                                            item.get(0).and_then(|x| x.as_str()).unwrap_or("?");
+                                        let score =
+                                            item.get(1).and_then(|x| x.as_f64()).unwrap_or(0.0);
                                         html.push_str(&format!(
                                             "<tr><td><code>{}</code></td><td><code>{}</code></td><td><code>{:.6}</code></td></tr>",
                                             i + 1,
@@ -4451,7 +4857,9 @@ fn run_view(args: &ViewArgs) -> Result<()> {
                 html.push_str("<p><code>transitive_dependents</code> is the size of the reverse-reachability set (who depends on you, transitively).</p>");
 
                 html.push_str("<h2>Axis PageRank mass</h2>");
-                html.push_str("<table><thead><tr><th>axis</th><th>pagerank mass</th></tr></thead><tbody>");
+                html.push_str(
+                    "<table><thead><tr><th>axis</th><th>pagerank mass</th></tr></thead><tbody>",
+                );
                 let mut keys: Vec<_> = axes_summary.totals.keys().cloned().collect();
                 keys.sort();
                 for k in keys {
@@ -4464,7 +4872,9 @@ fn run_view(args: &ViewArgs) -> Result<()> {
                 html.push_str("</tbody></table>");
 
                 html.push_str("<h2>Repo scatter (deps_pr vs commits_30d)</h2>");
-                html.push_str("<p>Point size ~ 3p deps; color by axis. Y is log1p(commits_30d).</p>");
+                html.push_str(
+                    "<p>Point size ~ 3p deps; color by axis. Y is log1p(commits_30d).</p>",
+                );
                 html.push_str(&render_repo_scatter_svg(&repo_rows));
 
                 // Invariants (cross-axis forbidden edges).
@@ -4504,30 +4914,59 @@ fn run_view(args: &ViewArgs) -> Result<()> {
                 if tlc_repo_path.exists() {
                     if let Ok(raw) = fs::read_to_string(&tlc_repo_path) {
                         if let Ok(v) = serde_json::from_str::<Vec<TlcRepoRow>>(&raw) {
-                            html.push_str("<h2>TLC: repos that are central and boundary-heavy</h2>");
-                            html.push_str("<p>Artifact: <code>evals/pkgrank/tlc.repos.json</code>.</p>");
+                            html.push_str(
+                                "<h2>TLC: repos that are central and boundary-heavy</h2>",
+                            );
+                            html.push_str(
+                                "<p>Artifact: <code>evals/pkgrank/tlc.repos.json</code>.</p>",
+                            );
                             html.push_str("<table><thead><tr><th>rank</th><th>repo</th><th>axis</th><th>score</th><th>deps_pr</th><th>consumers_pr</th><th>dependents</th><th>3p deps</th><th>violations</th><th>commits (30d)</th><th>days since</th><th>why</th></tr></thead><tbody>");
                             for (i, r) in v.iter().take(30).enumerate() {
-                                let readme = readme_details_html(&root, find_readme_for_repo(&root, &r.repo));
+                                let readme = readme_details_html(
+                                    &root,
+                                    find_readme_for_repo(&root, &r.repo),
+                                );
                                 html.push_str("<tr>");
                                 html.push_str(&format!("<td><code>{}</code></td>", i + 1));
                                 html.push_str("<td>");
                                 html.push_str(&format!("<code>{}</code>", html_escape(&r.repo)));
                                 html.push_str(&readme);
                                 html.push_str("</td>");
-                                html.push_str(&format!("<td><code>{}</code></td>", html_escape(&r.axis)));
+                                html.push_str(&format!(
+                                    "<td><code>{}</code></td>",
+                                    html_escape(&r.axis)
+                                ));
                                 html.push_str(&format!("<td><code>{:.2}</code></td>", r.score));
-                                html.push_str(&format!("<td><code>{:.6}</code></td>", r.deps_pagerank));
-                                html.push_str(&format!("<td><code>{:.6}</code></td>", r.consumers_pagerank));
-                                html.push_str(&format!("<td><code>{}</code></td>", r.transitive_dependents));
-                                html.push_str(&format!("<td><code>{}</code></td>", r.third_party_deps));
-                                html.push_str(&format!("<td><code>{}</code></td>", r.violation_weight));
+                                html.push_str(&format!(
+                                    "<td><code>{:.6}</code></td>",
+                                    r.deps_pagerank
+                                ));
+                                html.push_str(&format!(
+                                    "<td><code>{:.6}</code></td>",
+                                    r.consumers_pagerank
+                                ));
+                                html.push_str(&format!(
+                                    "<td><code>{}</code></td>",
+                                    r.transitive_dependents
+                                ));
+                                html.push_str(&format!(
+                                    "<td><code>{}</code></td>",
+                                    r.third_party_deps
+                                ));
+                                html.push_str(&format!(
+                                    "<td><code>{}</code></td>",
+                                    r.violation_weight
+                                ));
                                 match r.git_commits_30d {
-                                    Some(v) => html.push_str(&format!("<td><code>{}</code></td>", v)),
+                                    Some(v) => {
+                                        html.push_str(&format!("<td><code>{}</code></td>", v))
+                                    }
                                     None => html.push_str("<td><code>-</code></td>"),
                                 }
                                 match r.git_days_since_last_commit {
-                                    Some(v) => html.push_str(&format!("<td><code>{}</code></td>", v)),
+                                    Some(v) => {
+                                        html.push_str(&format!("<td><code>{}</code></td>", v))
+                                    }
                                     None => html.push_str("<td><code>-</code></td>"),
                                 }
                                 html.push_str(&format!("<td>{}</td>", html_escape(&r.why)));
@@ -4538,7 +4977,9 @@ fn run_view(args: &ViewArgs) -> Result<()> {
                     }
                 }
 
-                html.push_str("<h2>Top repos by dependency PageRank (A → B means A depends on B)</h2>");
+                html.push_str(
+                    "<h2>Top repos by dependency PageRank (A → B means A depends on B)</h2>",
+                );
                 html.push_str("<p>Also shown: consumer PageRank (reverse graph), which highlights orchestrators / top-level consumers.</p>");
                 html.push_str("<table><thead><tr><th>rank</th><th>repo</th><th>axis</th><th>in</th><th>out</th><th>in_w</th><th>out_w</th><th>deps_pr</th><th>consumers_pr</th><th>dependents</th><th>deps</th><th>3p deps</th><th>commits (30d)</th><th>days since</th></tr></thead><tbody>");
                 for (i, r) in repo_rows.iter().take(50).enumerate() {
@@ -4580,7 +5021,11 @@ fn run_view(args: &ViewArgs) -> Result<()> {
         let mut non_seeds = Vec::new();
         for r in &rows {
             let is_seed = r.get("is_seed").and_then(|x| x.as_bool()).unwrap_or(false);
-            if is_seed { seeds.push(r); } else { non_seeds.push(r); }
+            if is_seed {
+                seeds.push(r);
+            } else {
+                non_seeds.push(r);
+            }
         }
 
         html.push_str("<section id=\"cratesio\"><h2>crates.io: top nodes (PageRank)</h2>\n");
@@ -4655,7 +5100,12 @@ fn html_escape(s: &str) -> String {
 
 #[cfg(feature = "stdio")]
 fn p_display(root: &Path, p: Option<&PathBuf>) -> Option<String> {
-    p.map(|p| p.strip_prefix(root).ok().map(|x| x.display().to_string()).unwrap_or_else(|| p.display().to_string()))
+    p.map(|p| {
+        p.strip_prefix(root)
+            .ok()
+            .map(|x| x.display().to_string())
+            .unwrap_or_else(|| p.display().to_string())
+    })
 }
 
 // --- MCP stdio server (Cursor integration) ---
@@ -4826,7 +5276,9 @@ struct PkgrankStdioMcpSlim {
 impl PkgrankStdioMcpFull {
     #[allow(dead_code)]
     fn new() -> Self {
-        Self { tool_router: Self::tool_router() }
+        Self {
+            tool_router: Self::tool_router(),
+        }
     }
 
     fn default_root(params_root: Option<&str>) -> PathBuf {
@@ -4863,22 +5315,35 @@ impl PkgrankStdioMcpFull {
     }
 
     fn ensure_dir(path: &Path) -> Result<(), McpError> {
-        std::fs::create_dir_all(path)
-            .map_err(|e| McpError::internal_error(format!("failed to create dir {}: {}", path.display(), e), None))
+        std::fs::create_dir_all(path).map_err(|e| {
+            McpError::internal_error(
+                format!("failed to create dir {}: {}", path.display(), e),
+                None,
+            )
+        })
     }
 
     fn read_json_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, McpError> {
-        let raw = fs::read_to_string(path)
-            .map_err(|e| McpError::internal_error(format!("failed to read {}: {}", path.display(), e), None))?;
-        serde_json::from_str::<T>(&raw)
-            .map_err(|e| McpError::internal_error(format!("failed to parse {}: {}", path.display(), e), None))
+        let raw = fs::read_to_string(path).map_err(|e| {
+            McpError::internal_error(format!("failed to read {}: {}", path.display(), e), None)
+        })?;
+        serde_json::from_str::<T>(&raw).map_err(|e| {
+            McpError::internal_error(format!("failed to parse {}: {}", path.display(), e), None)
+        })
     }
 
     #[tool(description = "Check pkgrank artifact status (what exists, where, and basic metadata)")]
-    async fn pkgrank_status(&self, params: Parameters<PkgrankViewToolArgs>) -> Result<CallToolResult, McpError> {
+    async fn pkgrank_status(
+        &self,
+        params: Parameters<PkgrankViewToolArgs>,
+    ) -> Result<CallToolResult, McpError> {
         let root = Self::default_root(params.0.root.as_deref());
         let out = Self::default_out(params.0.out.as_deref());
-        let out_dir = if out.is_absolute() { out.clone() } else { root.join(&out) };
+        let out_dir = if out.is_absolute() {
+            out.clone()
+        } else {
+            root.join(&out)
+        };
 
         let files = [
             "pkgrank_overview.html",
@@ -4913,11 +5378,16 @@ impl PkgrankStdioMcpFull {
             "out_dir": out_dir.display().to_string(),
             "files": status,
         });
-        Ok(CallToolResult::success(vec![Content::text(payload.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            payload.to_string(),
+        )]))
     }
 
     #[tool(description = "Generate pkgrank HTML/JSON artifacts (pkgrank view)")]
-    async fn pkgrank_view(&self, params: Parameters<PkgrankViewToolArgs>) -> Result<CallToolResult, McpError> {
+    async fn pkgrank_view(
+        &self,
+        params: Parameters<PkgrankViewToolArgs>,
+    ) -> Result<CallToolResult, McpError> {
         let root = Self::default_root(params.0.root.as_deref());
         let out = Self::default_out(params.0.out.as_deref());
         let mode = match params.0.mode.as_deref().unwrap_or("local") {
@@ -4953,7 +5423,9 @@ impl PkgrankStdioMcpFull {
             "out_dir": if args.out.is_absolute() { args.out.display().to_string() } else { args.root.join(&args.out).display().to_string() },
             "html_path": html_path.display().to_string(),
         });
-        Ok(CallToolResult::success(vec![Content::text(payload.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            payload.to_string(),
+        )]))
     }
 
     #[tool(description = "Return top TLC crates (artifact-backed) with optional filters")]
@@ -4964,8 +5436,16 @@ impl PkgrankStdioMcpFull {
         let root = Self::default_root(params.0.get("root").and_then(|x| x.as_str()));
         let out = Self::default_out(params.0.get("out").and_then(|x| x.as_str()));
         let limit = params.0.get("limit").and_then(|x| x.as_u64()).unwrap_or(25) as usize;
-        let axis = params.0.get("axis").and_then(|x| x.as_str()).map(|s| s.to_string());
-        let repo = params.0.get("repo").and_then(|x| x.as_str()).map(|s| s.to_string());
+        let axis = params
+            .0
+            .get("axis")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string());
+        let repo = params
+            .0
+            .get("repo")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string());
 
         let path = Self::artifact_path(&root, &out, "tlc.crates.json");
         let rows: Vec<TlcCrateRow> = Self::read_json_file(&path)?;
@@ -4992,7 +5472,9 @@ impl PkgrankStdioMcpFull {
             "source": path.display().to_string(),
             "rows": out_rows,
         });
-        Ok(CallToolResult::success(vec![Content::text(payload.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            payload.to_string(),
+        )]))
     }
 
     #[tool(description = "Return top TLC repos (artifact-backed) with optional filters")]
@@ -5003,7 +5485,11 @@ impl PkgrankStdioMcpFull {
         let root = Self::default_root(params.0.get("root").and_then(|x| x.as_str()));
         let out = Self::default_out(params.0.get("out").and_then(|x| x.as_str()));
         let limit = params.0.get("limit").and_then(|x| x.as_u64()).unwrap_or(25) as usize;
-        let axis = params.0.get("axis").and_then(|x| x.as_str()).map(|s| s.to_string());
+        let axis = params
+            .0
+            .get("axis")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string());
 
         let path = Self::artifact_path(&root, &out, "tlc.repos.json");
         let rows: Vec<TlcRepoRow> = Self::read_json_file(&path)?;
@@ -5025,7 +5511,9 @@ impl PkgrankStdioMcpFull {
             "source": path.display().to_string(),
             "rows": out_rows,
         });
-        Ok(CallToolResult::success(vec![Content::text(payload.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            payload.to_string(),
+        )]))
     }
 
     #[tool(description = "List invariant violations (artifact-backed)")]
@@ -5042,7 +5530,9 @@ impl PkgrankStdioMcpFull {
             "source": path.display().to_string(),
             "violations": rows,
         });
-        Ok(CallToolResult::success(vec![Content::text(payload.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            payload.to_string(),
+        )]))
     }
 
     #[tool(description = "Get repo details from artifacts")]
@@ -5058,7 +5548,13 @@ impl PkgrankStdioMcpFull {
         let llm_timeout_secs = params.0.llm_timeout_secs.unwrap_or(30).min(600);
         let llm_cache = params.0.llm_cache.unwrap_or(true);
         let readme_max_chars = params.0.readme_max_chars.unwrap_or(4000).min(50_000);
-        let mut payload = repo_detail_payload(&root, &out, &params.0.repo, include_readme, readme_max_chars)?;
+        let mut payload = repo_detail_payload(
+            &root,
+            &out,
+            &params.0.repo,
+            include_readme,
+            readme_max_chars,
+        )?;
 
         let readme_path = find_readme_for_repo(&root, &params.0.repo);
         let ai = maybe_add_readme_llm_summary(
@@ -5076,7 +5572,9 @@ impl PkgrankStdioMcpFull {
         if let Some(obj) = payload.as_object_mut() {
             obj.insert("readme_ai".to_string(), ai);
         }
-        Ok(CallToolResult::success(vec![Content::text(payload.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            payload.to_string(),
+        )]))
     }
 
     #[tool(description = "Get crate details from artifacts")]
@@ -5092,7 +5590,13 @@ impl PkgrankStdioMcpFull {
         let llm_timeout_secs = params.0.llm_timeout_secs.unwrap_or(30).min(600);
         let llm_cache = params.0.llm_cache.unwrap_or(true);
         let readme_max_chars = params.0.readme_max_chars.unwrap_or(4000).min(50_000);
-        let mut payload = crate_detail_payload(&root, &out, &params.0.krate, include_readme, readme_max_chars)?;
+        let mut payload = crate_detail_payload(
+            &root,
+            &out,
+            &params.0.krate,
+            include_readme,
+            readme_max_chars,
+        )?;
 
         // Use TLC row (manifest_path) to locate README if present.
         let readme_path = payload
@@ -5116,7 +5620,9 @@ impl PkgrankStdioMcpFull {
         if let Some(obj) = payload.as_object_mut() {
             obj.insert("readme_ai".to_string(), ai);
         }
-        Ok(CallToolResult::success(vec![Content::text(payload.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            payload.to_string(),
+        )]))
     }
 
     #[tool(description = "Return PPR summaries (artifact-backed)")]
@@ -5138,7 +5644,9 @@ impl PkgrankStdioMcpFull {
             "entrypoints": entry,
             "aggregate": agg,
         });
-        Ok(CallToolResult::success(vec![Content::text(payload.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            payload.to_string(),
+        )]))
     }
 
     #[tool(description = "Snapshot pkgrank artifacts into a new directory (copy selected files)")]
@@ -5149,11 +5657,15 @@ impl PkgrankStdioMcpFull {
         let root = Self::default_root(params.0.root.as_deref());
         let out = Self::default_out(params.0.out.as_deref());
 
-        let label = params
-            .0
-            .label
-            .clone()
-            .unwrap_or_else(|| format!("run-{}", SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)));
+        let label = params.0.label.clone().unwrap_or_else(|| {
+            format!(
+                "run-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            )
+        });
 
         let dest = if let Some(d) = params.0.dest.as_deref() {
             PathBuf::from(d)
@@ -5166,8 +5678,16 @@ impl PkgrankStdioMcpFull {
             }
         };
 
-        let src_dir = if out.is_absolute() { out.clone() } else { root.join(&out) };
-        let dst_dir = if dest.is_absolute() { dest.clone() } else { root.join(&dest) };
+        let src_dir = if out.is_absolute() {
+            out.clone()
+        } else {
+            root.join(&out)
+        };
+        let dst_dir = if dest.is_absolute() {
+            dest.clone()
+        } else {
+            root.join(&dest)
+        };
         Self::ensure_dir(&dst_dir)?;
 
         let files = [
@@ -5196,7 +5716,15 @@ impl PkgrankStdioMcpFull {
                 Self::ensure_dir(parent)?;
             }
             std::fs::copy(&src, &dst).map_err(|e| {
-                McpError::internal_error(format!("failed to copy {} -> {}: {}", src.display(), dst.display(), e), None)
+                McpError::internal_error(
+                    format!(
+                        "failed to copy {} -> {}: {}",
+                        src.display(),
+                        dst.display(),
+                        e
+                    ),
+                    None,
+                )
             })?;
             copied.push(serde_json::json!({
                 "src": src.display().to_string(),
@@ -5213,7 +5741,9 @@ impl PkgrankStdioMcpFull {
             "copied": copied,
             "missing": missing,
         });
-        Ok(CallToolResult::success(vec![Content::text(payload.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            payload.to_string(),
+        )]))
     }
 
     #[tool(description = "Compare two pkgrank artifact directories (TLC crates/repos deltas)")]
@@ -5261,8 +5791,16 @@ impl PkgrankStdioMcpFull {
             }));
         }
         crate_deltas.sort_by(|a, b| {
-            let da = a.get("delta_rank").and_then(|x| x.as_i64()).unwrap_or(0).abs();
-            let db = b.get("delta_rank").and_then(|x| x.as_i64()).unwrap_or(0).abs();
+            let da = a
+                .get("delta_rank")
+                .and_then(|x| x.as_i64())
+                .unwrap_or(0)
+                .abs();
+            let db = b
+                .get("delta_rank")
+                .and_then(|x| x.as_i64())
+                .unwrap_or(0)
+                .abs();
             db.cmp(&da)
         });
 
@@ -5281,8 +5819,16 @@ impl PkgrankStdioMcpFull {
             }));
         }
         repo_deltas.sort_by(|a, b| {
-            let da = a.get("delta_rank").and_then(|x| x.as_i64()).unwrap_or(0).abs();
-            let db = b.get("delta_rank").and_then(|x| x.as_i64()).unwrap_or(0).abs();
+            let da = a
+                .get("delta_rank")
+                .and_then(|x| x.as_i64())
+                .unwrap_or(0)
+                .abs();
+            let db = b
+                .get("delta_rank")
+                .and_then(|x| x.as_i64())
+                .unwrap_or(0)
+                .abs();
             db.cmp(&da)
         });
 
@@ -5300,11 +5846,16 @@ impl PkgrankStdioMcpFull {
             "crate_rank_deltas": crate_deltas.into_iter().take(limit).collect::<Vec<_>>(),
             "repo_rank_deltas": repo_deltas.into_iter().take(limit).collect::<Vec<_>>(),
         });
-        Ok(CallToolResult::success(vec![Content::text(payload.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            payload.to_string(),
+        )]))
     }
 
     #[tool(description = "Compute local crate ranking (pkgrank analyze)")]
-    async fn pkgrank_analyze(&self, params: Parameters<PkgrankAnalyzeToolArgs>) -> Result<CallToolResult, McpError> {
+    async fn pkgrank_analyze(
+        &self,
+        params: Parameters<PkgrankAnalyzeToolArgs>,
+    ) -> Result<CallToolResult, McpError> {
         let path = params.0.path.clone().unwrap_or_else(|| ".".to_string());
         let analyze = AnalyzeArgs {
             path: PathBuf::from(path),
@@ -5318,19 +5869,27 @@ impl PkgrankStdioMcpFull {
             features: None,
             format: OutputFormat::Json,
         };
-        let rows = analyze_rows(&analyze).map_err(|e| McpError::internal_error(format!("{:#}", e), None))?;
+        let rows = analyze_rows(&analyze)
+            .map_err(|e| McpError::internal_error(format!("{:#}", e), None))?;
         let payload = serde_json::json!({
             "ok": true,
             "rows": rows,
         });
-        Ok(CallToolResult::success(vec![Content::text(payload.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            payload.to_string(),
+        )]))
     }
 
-    #[tool(description = "Compute internal module/item centrality (pkgrank modules; cargo-modules-backed)")]
-    async fn pkgrank_modules(&self, params: Parameters<PkgrankModulesToolArgs>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Compute internal module/item centrality (pkgrank modules; cargo-modules-backed)"
+    )]
+    async fn pkgrank_modules(
+        &self,
+        params: Parameters<PkgrankModulesToolArgs>,
+    ) -> Result<CallToolResult, McpError> {
         let args = modules_args_from_tool_params(&params.0)?;
-        let (rows, nodes, edges, aggregate_label, top_edges) =
-            run_modules_core(&args).map_err(|e| McpError::internal_error(format!("{:#}", e), None))?;
+        let (rows, nodes, edges, aggregate_label, top_edges) = run_modules_core(&args)
+            .map_err(|e| McpError::internal_error(format!("{:#}", e), None))?;
         let payload = serde_json::json!({
             "ok": true,
             "effective": {
@@ -5370,10 +5929,14 @@ impl PkgrankStdioMcpFull {
             "rows": rows,
             "top_edges": top_edges,
         });
-        Ok(CallToolResult::success(vec![Content::text(payload.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            payload.to_string(),
+        )]))
     }
 
-    #[tool(description = "Compute internal module/item centrality across multiple packages (pkgrank modules-sweep)")]
+    #[tool(
+        description = "Compute internal module/item centrality across multiple packages (pkgrank modules-sweep)"
+    )]
     async fn pkgrank_modules_sweep(
         &self,
         params: Parameters<PkgrankModulesSweepToolArgs>,
@@ -5383,7 +5946,9 @@ impl PkgrankStdioMcpFull {
         let include_top_edges = params.0.include_top_edges.unwrap_or(false);
         let payload = modules_sweep_payload(&args, include_rows, include_top_edges)
             .map_err(|e| McpError::internal_error(format!("{:#}", e), None))?;
-        Ok(CallToolResult::success(vec![Content::text(payload.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            payload.to_string(),
+        )]))
     }
 }
 
@@ -5392,7 +5957,10 @@ impl PkgrankStdioMcpFull {
 impl rmcp::ServerHandler for PkgrankStdioMcpFull {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            instructions: Some("Tools for ranking crates/repos in the local Cargo workspace (pkgrank).".to_string()),
+            instructions: Some(
+                "Tools for ranking crates/repos in the local Cargo workspace (pkgrank)."
+                    .to_string(),
+            ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }
@@ -5404,11 +5972,18 @@ impl rmcp::ServerHandler for PkgrankStdioMcpFull {
 #[tool_router]
 impl PkgrankStdioMcpSlim {
     fn new() -> Self {
-        Self { tool_router: Self::tool_router() }
+        Self {
+            tool_router: Self::tool_router(),
+        }
     }
 
-    #[tool(description = "Triage bundle: top TLC crates/repos + invariants + PPR top-k (artifact-backed)")]
-    async fn pkgrank_triage(&self, params: Parameters<PkgrankTriageArgs>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Triage bundle: top TLC crates/repos + invariants + PPR top-k (artifact-backed)"
+    )]
+    async fn pkgrank_triage(
+        &self,
+        params: Parameters<PkgrankTriageArgs>,
+    ) -> Result<CallToolResult, McpError> {
         let root = PkgrankStdioMcpFull::default_root(params.0.root.as_deref());
         let out = PkgrankStdioMcpFull::default_out(params.0.out.as_deref());
         let refresh_if_missing = params.0.refresh_if_missing.unwrap_or(true);
@@ -5437,7 +6012,8 @@ impl PkgrankStdioMcpSlim {
 
         let tlc_crates_path = PkgrankStdioMcpFull::artifact_path(&root, &out, "tlc.crates.json");
         let tlc_repos_path = PkgrankStdioMcpFull::artifact_path(&root, &out, "tlc.repos.json");
-        let inv_path = PkgrankStdioMcpFull::artifact_path(&root, &out, "ecosystem.invariants.violations.json");
+        let inv_path =
+            PkgrankStdioMcpFull::artifact_path(&root, &out, "ecosystem.invariants.violations.json");
         let ppr_agg_path = PkgrankStdioMcpFull::artifact_path(&root, &out, "ppr.aggregate.json");
 
         let required = [
@@ -5484,7 +6060,8 @@ impl PkgrankStdioMcpSlim {
 
         let mut crates: Vec<TlcCrateRow> = PkgrankStdioMcpFull::read_json_file(&tlc_crates_path)?;
         let mut repos: Vec<TlcRepoRow> = PkgrankStdioMcpFull::read_json_file(&tlc_repos_path)?;
-        let violations: Vec<RepoInvariantViolation> = PkgrankStdioMcpFull::read_json_file(&inv_path)?;
+        let violations: Vec<RepoInvariantViolation> =
+            PkgrankStdioMcpFull::read_json_file(&inv_path)?;
         let ppr_agg: Vec<(String, f64)> = PkgrankStdioMcpFull::read_json_file(&ppr_agg_path)?;
 
         if let Some(ax) = axis.as_ref() {
@@ -5679,7 +6256,11 @@ impl PkgrankStdioMcpSlim {
                 .unwrap_or("")
         );
         let _ = writeln!(&mut summary, "");
-        let _ = writeln!(&mut summary, "Invariant rule counts (top): {:?}", violation_rules_top);
+        let _ = writeln!(
+            &mut summary,
+            "Invariant rule counts (top): {:?}",
+            violation_rules_top
+        );
 
         Ok(CallToolResult::success(vec![
             Content::text(summary),
@@ -5688,7 +6269,10 @@ impl PkgrankStdioMcpSlim {
     }
 
     #[tool(description = "Generate pkgrank artifacts (pkgrank view)")]
-    async fn pkgrank_view(&self, params: Parameters<PkgrankViewToolArgs>) -> Result<CallToolResult, McpError> {
+    async fn pkgrank_view(
+        &self,
+        params: Parameters<PkgrankViewToolArgs>,
+    ) -> Result<CallToolResult, McpError> {
         // Delegate to full implementation logic by constructing args locally (copy, not reuse trait objects).
         let root = PkgrankStdioMcpFull::default_root(params.0.root.as_deref());
         let out = PkgrankStdioMcpFull::default_out(params.0.out.as_deref());
@@ -5717,72 +6301,123 @@ impl PkgrankStdioMcpSlim {
         };
 
         run_view(&args).map_err(|e| McpError::internal_error(format!("{:#}", e), None))?;
-        let html_path = PkgrankStdioMcpFull::artifact_path(&args.root, &args.out, "pkgrank_overview.html");
+        let html_path =
+            PkgrankStdioMcpFull::artifact_path(&args.root, &args.out, "pkgrank_overview.html");
         let payload = serde_json::json!({
             "ok": true,
             "root": args.root.display().to_string(),
             "out_dir": if args.out.is_absolute() { args.out.display().to_string() } else { args.root.join(&args.out).display().to_string() },
             "html_path": html_path.display().to_string(),
         });
-        Ok(CallToolResult::success(vec![Content::text(payload.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            payload.to_string(),
+        )]))
     }
 
     #[tool(description = "Compute local crate ranking (pkgrank analyze)")]
-    async fn pkgrank_analyze(&self, params: Parameters<PkgrankAnalyzeToolArgs>) -> Result<CallToolResult, McpError> {
-        PkgrankStdioMcpFull { tool_router: PkgrankStdioMcpFull::tool_router() }
-            .pkgrank_analyze(params)
-            .await
+    async fn pkgrank_analyze(
+        &self,
+        params: Parameters<PkgrankAnalyzeToolArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        PkgrankStdioMcpFull {
+            tool_router: PkgrankStdioMcpFull::tool_router(),
+        }
+        .pkgrank_analyze(params)
+        .await
     }
 
-    #[tool(description = "Compute internal module/item centrality (pkgrank modules; cargo-modules-backed)")]
-    async fn pkgrank_modules(&self, params: Parameters<PkgrankModulesToolArgs>) -> Result<CallToolResult, McpError> {
-        PkgrankStdioMcpFull { tool_router: PkgrankStdioMcpFull::tool_router() }
-            .pkgrank_modules(params)
-            .await
+    #[tool(
+        description = "Compute internal module/item centrality (pkgrank modules; cargo-modules-backed)"
+    )]
+    async fn pkgrank_modules(
+        &self,
+        params: Parameters<PkgrankModulesToolArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        PkgrankStdioMcpFull {
+            tool_router: PkgrankStdioMcpFull::tool_router(),
+        }
+        .pkgrank_modules(params)
+        .await
     }
 
-    #[tool(description = "Compute internal module/item centrality across multiple packages (pkgrank modules-sweep)")]
+    #[tool(
+        description = "Compute internal module/item centrality across multiple packages (pkgrank modules-sweep)"
+    )]
     async fn pkgrank_modules_sweep(
         &self,
         params: Parameters<PkgrankModulesSweepToolArgs>,
     ) -> Result<CallToolResult, McpError> {
-        PkgrankStdioMcpFull { tool_router: PkgrankStdioMcpFull::tool_router() }
-            .pkgrank_modules_sweep(params)
-            .await
+        PkgrankStdioMcpFull {
+            tool_router: PkgrankStdioMcpFull::tool_router(),
+        }
+        .pkgrank_modules_sweep(params)
+        .await
     }
 
     #[tool(description = "Get repo details from artifacts")]
-    async fn pkgrank_repo_detail(&self, params: Parameters<PkgrankRepoDetailArgs>) -> Result<CallToolResult, McpError> {
+    async fn pkgrank_repo_detail(
+        &self,
+        params: Parameters<PkgrankRepoDetailArgs>,
+    ) -> Result<CallToolResult, McpError> {
         let root = PkgrankStdioMcpFull::default_root(params.0.root.as_deref());
         let out = PkgrankStdioMcpFull::default_out(params.0.out.as_deref());
         let include_readme = params.0.include_readme.unwrap_or(false);
         let readme_max_chars = params.0.readme_max_chars.unwrap_or(4000).min(50_000);
-        let payload = repo_detail_payload(&root, &out, &params.0.repo, include_readme, readme_max_chars)?;
-        Ok(CallToolResult::success(vec![Content::text(payload.to_string())]))
+        let payload = repo_detail_payload(
+            &root,
+            &out,
+            &params.0.repo,
+            include_readme,
+            readme_max_chars,
+        )?;
+        Ok(CallToolResult::success(vec![Content::text(
+            payload.to_string(),
+        )]))
     }
 
     #[tool(description = "Get crate details from artifacts")]
-    async fn pkgrank_crate_detail(&self, params: Parameters<PkgrankCrateDetailArgs>) -> Result<CallToolResult, McpError> {
+    async fn pkgrank_crate_detail(
+        &self,
+        params: Parameters<PkgrankCrateDetailArgs>,
+    ) -> Result<CallToolResult, McpError> {
         let root = PkgrankStdioMcpFull::default_root(params.0.root.as_deref());
         let out = PkgrankStdioMcpFull::default_out(params.0.out.as_deref());
         let include_readme = params.0.include_readme.unwrap_or(false);
         let readme_max_chars = params.0.readme_max_chars.unwrap_or(4000).min(50_000);
-        let payload = crate_detail_payload(&root, &out, &params.0.krate, include_readme, readme_max_chars)?;
-        Ok(CallToolResult::success(vec![Content::text(payload.to_string())]))
+        let payload = crate_detail_payload(
+            &root,
+            &out,
+            &params.0.krate,
+            include_readme,
+            readme_max_chars,
+        )?;
+        Ok(CallToolResult::success(vec![Content::text(
+            payload.to_string(),
+        )]))
     }
 
     #[tool(description = "Snapshot pkgrank artifacts (copy selected files)")]
-    async fn pkgrank_snapshot(&self, params: Parameters<PkgrankSnapshotArgs>) -> Result<CallToolResult, McpError> {
-        PkgrankStdioMcpFull { tool_router: PkgrankStdioMcpFull::tool_router() }
-            .pkgrank_snapshot(params)
-            .await
+    async fn pkgrank_snapshot(
+        &self,
+        params: Parameters<PkgrankSnapshotArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        PkgrankStdioMcpFull {
+            tool_router: PkgrankStdioMcpFull::tool_router(),
+        }
+        .pkgrank_snapshot(params)
+        .await
     }
 
     #[tool(description = "Compare two artifact directories (TLC deltas)")]
-    async fn pkgrank_compare_runs(&self, params: Parameters<PkgrankCompareRunsArgs>) -> Result<CallToolResult, McpError> {
-        PkgrankStdioMcpFull { tool_router: PkgrankStdioMcpFull::tool_router() }
-            .pkgrank_compare_runs(params)
-            .await
+    async fn pkgrank_compare_runs(
+        &self,
+        params: Parameters<PkgrankCompareRunsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        PkgrankStdioMcpFull {
+            tool_router: PkgrankStdioMcpFull::tool_router(),
+        }
+        .pkgrank_compare_runs(params)
+        .await
     }
 }
 
@@ -5791,7 +6426,10 @@ impl PkgrankStdioMcpSlim {
 impl rmcp::ServerHandler for PkgrankStdioMcpSlim {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            instructions: Some("Tools for ranking crates/repos in the local Cargo workspace (pkgrank).".to_string()),
+            instructions: Some(
+                "Tools for ranking crates/repos in the local Cargo workspace (pkgrank)."
+                    .to_string(),
+            ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }
@@ -5901,8 +6539,19 @@ fn sanitize_id_piece(s: &str, max_len: usize) -> String {
 }
 
 #[cfg(feature = "stdio")]
-fn readme_ai_cache_path(root: &Path, out: &Path, kind: &str, name: &str, readme_path: &Path, cmd_id: &str) -> PathBuf {
-    let out_dir = if out.is_absolute() { out.to_path_buf() } else { root.join(out) };
+fn readme_ai_cache_path(
+    root: &Path,
+    out: &Path,
+    kind: &str,
+    name: &str,
+    readme_path: &Path,
+    cmd_id: &str,
+) -> PathBuf {
+    let out_dir = if out.is_absolute() {
+        out.to_path_buf()
+    } else {
+        root.join(out)
+    };
     let cache_dir = out_dir.join("readme_ai_cache");
 
     let md = std::fs::metadata(readme_path).ok();
@@ -5926,7 +6575,10 @@ async fn llm_summarize_readme(
     timeout_secs: u64,
 ) -> Result<String, McpError> {
     if cmd.is_empty() {
-        return Err(McpError::invalid_params("LLM cmd is empty".to_string(), None));
+        return Err(McpError::invalid_params(
+            "LLM cmd is empty".to_string(),
+            None,
+        ));
     }
     let mut c = TokioCommand::new(&cmd[0]);
     if cmd.len() > 1 {
@@ -5970,12 +6622,16 @@ README:
         let input = format!("{prompt}\n{readme_text}\n");
         tokio::io::AsyncWriteExt::write_all(&mut stdin, input.as_bytes())
             .await
-            .map_err(|e| McpError::internal_error(format!("failed writing to LLM stdin: {e}"), None))?;
+            .map_err(|e| {
+                McpError::internal_error(format!("failed writing to LLM stdin: {e}"), None)
+            })?;
     }
 
     let out = timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
         .await
-        .map_err(|_| McpError::internal_error(format!("LLM cmd timed out after {timeout_secs}s"), None))?
+        .map_err(|_| {
+            McpError::internal_error(format!("LLM cmd timed out after {timeout_secs}s"), None)
+        })?
         .map_err(|e| McpError::internal_error(format!("failed to wait for LLM cmd: {e}"), None))?;
 
     if !out.status.success() {
@@ -5988,7 +6644,10 @@ README:
 
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if s.is_empty() {
-        return Err(McpError::internal_error("LLM returned empty summary".to_string(), None));
+        return Err(McpError::internal_error(
+            "LLM returned empty summary".to_string(),
+            None,
+        ));
     }
     Ok(s)
 }
@@ -6030,12 +6689,18 @@ fn format_top_tlc_crates(rows: &[TlcCrateRow], k: usize) -> String {
     out
 }
 
-fn summarize_violation_rules(violations: &[RepoInvariantViolation], topk: usize) -> Vec<(String, usize)> {
+fn summarize_violation_rules(
+    violations: &[RepoInvariantViolation],
+    topk: usize,
+) -> Vec<(String, usize)> {
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for v in violations {
         *counts.entry(v.rule.as_str()).or_insert(0) += 1;
     }
-    let mut out: Vec<(String, usize)> = counts.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    let mut out: Vec<(String, usize)> = counts
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
     out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     out.into_iter().take(topk).collect()
 }
@@ -6130,7 +6795,9 @@ async fn maybe_add_readme_llm_summary(
     }
 
     let Some(readme_path) = readme_path else {
-        return Ok(serde_json::json!({ "enabled": true, "available": false, "reason": "no readme found" }));
+        return Ok(
+            serde_json::json!({ "enabled": true, "available": false, "reason": "no readme found" }),
+        );
     };
 
     let Some(cmd) = llm_summary_cmd_from_env()? else {
@@ -6164,7 +6831,9 @@ async fn maybe_add_readme_llm_summary(
     let snippet = read_text_snippet(readme_path, llm_input_max_chars)
         .map_err(|e| McpError::internal_error(format!("{:#}", e), None))?;
     let Some((txt, truncated)) = snippet else {
-        return Ok(serde_json::json!({ "enabled": true, "available": false, "reason": "readme unreadable/empty" }));
+        return Ok(
+            serde_json::json!({ "enabled": true, "available": false, "reason": "readme unreadable/empty" }),
+        );
     };
 
     let summary = llm_summarize_readme(&cmd, &txt, llm_timeout_secs).await?;
