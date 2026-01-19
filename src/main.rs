@@ -22,7 +22,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use walk::{betweenness_centrality, pagerank, pagerank_weighted, personalized_pagerank, reachability_counts_edges, PageRankConfig};
+use walk::{
+    betweenness_centrality, pagerank, pagerank_weighted, personalized_pagerank,
+    reachability_counts_edges, PageRankConfig,
+};
 
 #[cfg(feature = "stdio")]
 use rmcp::{
