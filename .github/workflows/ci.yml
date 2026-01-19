@@ -15,8 +15,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Rust toolchain (1.80 + components)
-        uses: dtolnay/rust-toolchain@1.80.0
+      - name: Rust toolchain (stable + components)
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
