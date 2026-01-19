@@ -22,11 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-mod centrality;
-use centrality::{
-    betweenness_centrality, pagerank, personalized_pagerank, reachability_counts_edges, reverse_graph,
-    PageRankConfig,
-};
+use walk::{betweenness_centrality, pagerank, pagerank_weighted, personalized_pagerank, reachability_counts_edges, PageRankConfig};
 
 #[cfg(feature = "stdio")]
 use rmcp::{
@@ -71,6 +67,35 @@ enum Command {
     View(ViewArgs),
     /// Serve as an MCP stdio server (for Cursor).
     McpStdio,
+}
+
+fn pagerank_auto<N>(graph: &DiGraph<N, f64>) -> Vec<f64> {
+    // In pkgrank, many graphs use "all weights == 1.0" to mean unweighted. Prefer the unweighted
+    // implementation in that case, but fall back to weighted PageRank when any edge has a non-unit
+    // weight.
+    let is_unweighted = graph.edge_weights().all(|w| (*w - 1.0).abs() < 1e-12);
+    let cfg = PageRankConfig::default();
+    if is_unweighted {
+        pagerank(graph, cfg)
+    } else {
+        pagerank_weighted(graph, cfg)
+    }
+}
+
+fn reverse_graph<N: Clone>(graph: &DiGraph<N, f64>) -> DiGraph<N, f64> {
+    // Reverse a graph while preserving node order (so NodeIndex::index() aligns).
+    let mut rev: DiGraph<N, f64> = DiGraph::new();
+    let mut idx_map: Vec<NodeIndex> = Vec::with_capacity(graph.node_count());
+    for n in graph.node_indices() {
+        idx_map.push(rev.add_node(graph.node_weight(n).expect("node weight").clone()));
+    }
+    for e in graph.edge_references() {
+        let u = e.source().index();
+        let v = e.target().index();
+        let w = *e.weight();
+        rev.update_edge(idx_map[v], idx_map[u], w);
+    }
+    rev
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -1168,7 +1193,7 @@ fn run_modules_core(
     // Node-level centralities (used for “top members” previews during aggregation).
     // Note: when aggregating, these remain useful because they identify which items
     // inside a file/module are carrying the coupling.
-    let node_pr = pagerank(&g);
+    let node_pr = pagerank_auto(&g);
 
     // Optionally aggregate.
     let (g2, members_map, aggregate_label) = if matches!(args.aggregate, ModuleAggregate::Node) {
@@ -1203,8 +1228,8 @@ fn run_modules_core(
         reachability_counts_edges(g2.node_count(), &edge_pairs);
 
     // Compute centralities on the chosen graph.
-    let pr = pagerank(&g2);
-    let consumers_pr = pagerank(&reverse_graph(&g2));
+    let pr = pagerank_auto(&g2);
+    let consumers_pr = pagerank_auto(&reverse_graph(&g2));
     let bc = betweenness_centrality(&g2);
 
     let mut rows: Vec<ModuleRow> = g2
@@ -2141,8 +2166,8 @@ fn compute_rows(
 
     let workspace: HashSet<&PackageId> = metadata.workspace_members.iter().collect();
 
-    let pr = pagerank(graph);
-    let consumers_pr = pagerank(&reverse_graph(graph));
+    let pr = pagerank_auto(graph);
+    let consumers_pr = pagerank_auto(&reverse_graph(graph));
     let betweenness = betweenness_centrality(graph);
 
     let mut rows = Vec::with_capacity(graph.node_count());
@@ -2744,7 +2769,7 @@ fn compute_tlc_crates(root: &Path, out_dir: &Path) -> Result<Vec<TlcCrateRow>> {
     for (u, v) in &fp_edges {
         fp_g.update_edge(fp_idx[*u], fp_idx[*v], 1.0);
     }
-    let fp_pr = pagerank(&fp_g);
+    let fp_pr = pagerank_auto(&fp_g);
     let fp_bc = betweenness_centrality(&fp_g);
 
     // Personalized PageRank “what do boundary-heavy entrypoints lean on?”
@@ -3085,7 +3110,7 @@ fn compute_repo_graph_from_live_metadata(
     // Two interpretations:
     // - depends_pr: PageRank on A->B (dependencies)
     // - consumers_pr: PageRank on reversed graph (consumers/orchestrators)
-    let depends_pr = pagerank(&g);
+    let depends_pr = pagerank_auto(&g);
     let mut g_rev: DiGraph<String, f64> = DiGraph::new();
     let mut idx2: HashMap<String, NodeIndex> = HashMap::new();
     for r in &repos {
@@ -3097,7 +3122,7 @@ fn compute_repo_graph_from_live_metadata(
             g_rev.update_edge(ib, ia, *w as f64);
         }
     }
-    let consumers_pr = pagerank(&g_rev);
+    let consumers_pr = pagerank_auto(&g_rev);
 
     // Transitive counts computed on unweighted reachability.
     let (dependents, deps) = reachability_counts(&repos, &edges);
@@ -4288,7 +4313,7 @@ fn run_cratesio(args: &CratesIoArgs) -> Result<()> {
         }
     }
 
-    let pr = pagerank(&graph);
+    let pr = pagerank_auto(&graph);
     let bc = betweenness_centrality(&graph);
 
     #[derive(Debug, Serialize)]

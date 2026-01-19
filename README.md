@@ -122,5 +122,5 @@ Tools (high level):
 ### Dependencies / integration notes
 
 - `pkgrank` intentionally avoids depending on private sibling repos.
-  Centrality operators (PageRank / PPR / reachability) are implemented locally in `src/centrality.rs`.
+  Centrality operators (PageRank / PPR / reachability / betweenness) come from `walk` (pulled via git).
 
