@@ -190,6 +190,66 @@ pub fn reverse_graph<N: Clone>(graph: &DiGraph<N, f64>) -> DiGraph<N, f64> {
     rev
 }
 
+/// Betweenness centrality (Brandes) for directed, unweighted graphs.
+///
+/// Returns one score per NodeIndex, ordered by index.
+pub fn betweenness_centrality<N>(graph: &DiGraph<N, f64>) -> Vec<f64> {
+    let n = graph.node_count();
+    if n <= 2 {
+        return vec![0.0; n];
+    }
+
+    let mut betweenness = vec![0.0; n];
+
+    for s in graph.node_indices() {
+        let mut stack = Vec::new();
+        let mut pred: Vec<Vec<NodeIndex>> = vec![vec![]; n];
+        let mut sigma = vec![0.0; n];
+        let mut dist: Vec<i32> = vec![-1; n];
+
+        sigma[s.index()] = 1.0;
+        dist[s.index()] = 0;
+
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(s);
+
+        while let Some(v) = queue.pop_front() {
+            stack.push(v);
+            for w in graph.neighbors_directed(v, Direction::Outgoing) {
+                if dist[w.index()] < 0 {
+                    dist[w.index()] = dist[v.index()] + 1;
+                    queue.push_back(w);
+                }
+                if dist[w.index()] == dist[v.index()] + 1 {
+                    sigma[w.index()] += sigma[v.index()];
+                    pred[w.index()].push(v);
+                }
+            }
+        }
+
+        let mut delta = vec![0.0; n];
+        while let Some(w) = stack.pop() {
+            for &v in &pred[w.index()] {
+                // sigma[w] can be 0 for disconnected nodes; guard division.
+                if sigma[w.index()] > 0.0 {
+                    delta[v.index()] +=
+                        (sigma[v.index()] / sigma[w.index()]) * (1.0 + delta[w.index()]);
+                }
+            }
+            if w != s {
+                betweenness[w.index()] += delta[w.index()];
+            }
+        }
+    }
+
+    // Directed normalization to [0,1] for connected-ish graphs.
+    let norm = 1.0 / ((n - 1) * (n - 2)) as f64;
+    for b in &mut betweenness {
+        *b *= norm;
+    }
+    betweenness
+}
+
 fn pagerank_unweighted<N>(graph: &DiGraph<N, f64>, cfg: PageRankConfig) -> Vec<f64> {
     // Treat every edge as weight 1.
     let n = graph.node_count();
