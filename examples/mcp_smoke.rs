@@ -18,34 +18,149 @@ use rmcp::{
 // keep serde_json in scope for json! macro usage
 use serde_json as _;
 #[cfg(feature = "stdio")]
-use std::path::PathBuf;
+use serde_json::Value;
+#[cfg(feature = "stdio")]
+use std::path::{Path, PathBuf};
 #[cfg(feature = "stdio")]
 use tokio::process::Command;
 
 #[cfg(feature = "stdio")]
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let bin = root.join("target/debug/pkgrank");
-    eprintln!("spawning: {} mcp-stdio", bin.display());
+fn tool_names(tools: &rmcp::model::ListToolsResult) -> Vec<String> {
+    tools.tools.iter().map(|t| t.name.to_string()).collect()
+}
 
+#[cfg(feature = "stdio")]
+fn assert_toolset(toolset: &str, names: &[String]) -> anyhow::Result<()> {
+    let mut missing = Vec::new();
+    for required in [
+        "pkgrank_view",
+        "pkgrank_triage",
+        "pkgrank_analyze",
+        "pkgrank_repo_detail",
+        "pkgrank_crate_detail",
+        "pkgrank_snapshot",
+        "pkgrank_compare_runs",
+    ] {
+        if !names.iter().any(|n| n == required) {
+            missing.push(required);
+        }
+    }
+    anyhow::ensure!(
+        missing.is_empty(),
+        "[{toolset}] missing expected baseline tools: {:?} (got {:?})",
+        missing,
+        names
+    );
+
+    let has = |n: &str| names.iter().any(|x| x == n);
+    match toolset {
+        "slim" => {
+            for forbidden in [
+                "pkgrank_status",
+                "pkgrank_modules",
+                "pkgrank_modules_sweep",
+                "pkgrank_tlc_crates",
+                "pkgrank_tlc_repos",
+                "pkgrank_invariants",
+                "pkgrank_ppr_summary",
+            ] {
+                anyhow::ensure!(
+                    !has(forbidden),
+                    "[slim] should not advertise {forbidden} (got {:?})",
+                    names
+                );
+            }
+        }
+        "full" => {
+            for required in ["pkgrank_status", "pkgrank_modules", "pkgrank_modules_sweep"] {
+                anyhow::ensure!(has(required), "[full] missing {required} (got {:?})", names);
+            }
+            for forbidden in [
+                "pkgrank_tlc_crates",
+                "pkgrank_tlc_repos",
+                "pkgrank_invariants",
+                "pkgrank_ppr_summary",
+            ] {
+                anyhow::ensure!(
+                    !has(forbidden),
+                    "[full] should not advertise debug-only {forbidden} (got {:?})",
+                    names
+                );
+            }
+        }
+        "debug" => {
+            for required in [
+                "pkgrank_status",
+                "pkgrank_modules",
+                "pkgrank_modules_sweep",
+                "pkgrank_tlc_crates",
+                "pkgrank_tlc_repos",
+                "pkgrank_invariants",
+                "pkgrank_ppr_summary",
+            ] {
+                anyhow::ensure!(
+                    has(required),
+                    "[debug] missing {required} (got {:?})",
+                    names
+                );
+            }
+        }
+        other => anyhow::bail!("unknown toolset {other}"),
+    }
+    Ok(())
+}
+
+#[cfg(feature = "stdio")]
+fn extract_wrapped_json(tool: &str, call: &rmcp::model::CallToolResult) -> anyhow::Result<Value> {
+    let texts: Vec<&str> = call
+        .content
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.as_str()))
+        .collect();
+    anyhow::ensure!(
+        texts.len() == 1,
+        "{tool}: expected exactly one text payload, got {}",
+        texts.len()
+    );
+    let v: Value = serde_json::from_str(texts[0])?;
+    anyhow::ensure!(
+        v.get("schema_version").and_then(|x| x.as_u64()) == Some(1),
+        "{tool}: missing/invalid schema_version"
+    );
+    anyhow::ensure!(
+        v.get("ok").and_then(|x| x.as_bool()) == Some(true),
+        "{tool}: ok != true"
+    );
+    anyhow::ensure!(
+        v.get("tool").and_then(|x| x.as_str()) == Some(tool),
+        "{tool}: tool field mismatch"
+    );
+    anyhow::ensure!(v.get("result").is_some(), "{tool}: missing result");
+    Ok(v)
+}
+
+#[cfg(feature = "stdio")]
+async fn spawn_and_check(bin: &Path, root: &Path, toolset: &str) -> anyhow::Result<()> {
+    eprintln!(
+        "spawning: {} mcp-stdio (toolset={})",
+        bin.display(),
+        toolset
+    );
     let service = ()
-        .serve(TokioChildProcess::new(Command::new(&bin).configure(
+        .serve(TokioChildProcess::new(Command::new(bin).configure(
             |cmd| {
                 cmd.arg("mcp-stdio");
+                // Always set explicitly to avoid inheriting user shell env.
+                cmd.env("PKGRANK_MCP_TOOLSET", toolset);
             },
         ))?)
         .await?;
 
-    let info = service.peer_info();
-    println!("peer_info: {:#?}", info);
-
     let tools = service.list_tools(Default::default()).await?;
-    println!("tools: {:#?}", tools);
+    let names = tool_names(&tools);
+    assert_toolset(toolset, &names)?;
 
+    // Quick wrapper-schema checks on a couple core tools.
     let view = service
         .call_tool(CallToolRequestParam {
             name: "pkgrank_view".into(),
@@ -57,108 +172,67 @@ async fn main() -> anyhow::Result<()> {
             ),
         })
         .await?;
-    println!("pkgrank_view: {:#?}", view);
+    let _ = extract_wrapped_json("pkgrank_view", &view)?;
 
     let triage = service
         .call_tool(CallToolRequestParam {
             name: "pkgrank_triage".into(),
             arguments: Some(
-                serde_json::json!({"root": root.display().to_string(), "limit": 8, "ppr_top": 8})
+                serde_json::json!({"root": root.display().to_string(), "limit": 5, "ppr_top": 5})
                     .as_object()
                     .cloned()
                     .unwrap_or_default(),
             ),
         })
         .await?;
-    println!("pkgrank_triage: {:#?}", triage);
+    let triage_v = extract_wrapped_json("pkgrank_triage", &triage)?;
+    anyhow::ensure!(
+        triage_v
+            .get("summary_text")
+            .and_then(|x| x.as_str())
+            .is_some(),
+        "pkgrank_triage: expected summary_text"
+    );
 
-    // Snapshot the current artifacts to a run dir (A).
-    let snap_a = service
-        .call_tool(CallToolRequestParam {
-            name: "pkgrank_snapshot".into(),
-            arguments: Some(
-                serde_json::json!({"root": root.display().to_string(), "label": "smoke-a"})
-                    .as_object()
-                    .cloned()
-                    .unwrap_or_default(),
-            ),
-        })
-        .await?;
-    println!("pkgrank_snapshot(smoke-a): {:#?}", snap_a);
-
-    // Re-run view to simulate a new run (should be deterministic if nothing changed).
-    let view2 = service
-        .call_tool(CallToolRequestParam {
-            name: "pkgrank_view".into(),
-            arguments: Some(
-                serde_json::json!({"root": root.display().to_string(), "mode": "local"})
-                    .as_object()
-                    .cloned()
-                    .unwrap_or_default(),
-            ),
-        })
-        .await?;
-    println!("pkgrank_view (2): {:#?}", view2);
-
-    // Snapshot (B).
-    let snap_b = service
-        .call_tool(CallToolRequestParam {
-            name: "pkgrank_snapshot".into(),
-            arguments: Some(
-                serde_json::json!({"root": root.display().to_string(), "label": "smoke-b"})
-                    .as_object()
-                    .cloned()
-                    .unwrap_or_default(),
-            ),
-        })
-        .await?;
-    println!("pkgrank_snapshot(smoke-b): {:#?}", snap_b);
-
-    // Compare snapshots.
-    let compare = service
-        .call_tool(CallToolRequestParam {
-            name: "pkgrank_compare_runs".into(),
-            arguments: Some(
-                serde_json::json!({
-                    "root": root.display().to_string(),
-                    "old_out": "evals/pkgrank/runs/smoke-a",
-                    "new_out": "evals/pkgrank/runs/smoke-b",
-                    "limit": 10
-                })
-                .as_object()
-                .cloned()
-                .unwrap_or_default(),
-            ),
-        })
-        .await?;
-    println!("pkgrank_compare_runs: {:#?}", compare);
-
-    let repo_detail = service
-        .call_tool(CallToolRequestParam {
-            name: "pkgrank_repo_detail".into(),
-            arguments: Some(
-                serde_json::json!({"root": root.display().to_string(), "repo": "hop"})
-                    .as_object()
-                    .cloned()
-                    .unwrap_or_default(),
-            ),
-        })
-        .await?;
-    println!("pkgrank_repo_detail(hop): {:#?}", repo_detail);
-
-    let crate_detail = service
-        .call_tool(CallToolRequestParam {
-            name: "pkgrank_crate_detail".into(),
-            arguments: Some(
-                serde_json::json!({"root": root.display().to_string(), "crate": "hop-core"})
-                    .as_object()
-                    .cloned()
-                    .unwrap_or_default(),
-            ),
-        })
-        .await?;
-    println!("pkgrank_crate_detail(hop-core): {:#?}", crate_detail);
+    // Debug-only tool should work in debug toolset.
+    if toolset == "debug" {
+        let inv = service
+            .call_tool(CallToolRequestParam {
+                name: "pkgrank_invariants".into(),
+                arguments: Some(
+                    serde_json::json!({"root": root.display().to_string()})
+                        .as_object()
+                        .cloned()
+                        .unwrap_or_default(),
+                ),
+            })
+            .await?;
+        let _ = extract_wrapped_json("pkgrank_invariants", &inv)?;
+    }
 
     service.cancel().await?;
+    Ok(())
+}
+
+#[cfg(feature = "stdio")]
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let pkgrank_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dev_root = pkgrank_root.parent().unwrap().to_path_buf();
+    let bin = pkgrank_root.join("target/debug/pkgrank");
+    // Ensure the server binary exists *and* matches current sources/features.
+    // (The example itself can compile without rebuilding the pkgrank binary.)
+    let status = Command::new("cargo")
+        .current_dir(&pkgrank_root)
+        .args(["build", "--features", "stdio"])
+        .status()
+        .await?;
+    anyhow::ensure!(status.success(), "cargo build --features stdio failed");
+    anyhow::ensure!(bin.exists(), "expected pkgrank binary at {}", bin.display());
+
+    // Validate toolsets + schema wrapper contract.
+    spawn_and_check(&bin, &dev_root, "slim").await?;
+    spawn_and_check(&bin, &dev_root, "full").await?;
+    spawn_and_check(&bin, &dev_root, "debug").await?;
     Ok(())
 }

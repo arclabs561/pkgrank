@@ -20,11 +20,14 @@ use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
+use std::time::Instant;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use walk::{
-    betweenness_centrality, pagerank, pagerank_weighted, personalized_pagerank,
-    reachability_counts_edges, PageRankConfig,
+use graphops::{
+    betweenness_centrality, pagerank, pagerank_checked, pagerank_checked_run, pagerank_run,
+    pagerank_weighted, pagerank_weighted_checked, pagerank_weighted_checked_run,
+    pagerank_weighted_run, personalized_pagerank, reachability_counts_edges, PageRankConfig,
+    PageRankRun,
 };
 
 #[cfg(feature = "stdio")]
@@ -68,6 +71,10 @@ enum Command {
     ModulesSweep(ModulesSweepArgs),
     /// One-shot view: local sweep + crates.io crawl, written as HTML + JSON.
     View(ViewArgs),
+    /// Triage bundle: top TLC crates/repos + invariants + PPR top-k (artifact-backed).
+    ///
+    /// This is the same “triage” payload as the MCP tool `pkgrank_triage`, but usable from CLI.
+    Triage(TriageCliArgs),
     /// Serve as an MCP stdio server (for Cursor).
     McpStdio,
 }
@@ -79,9 +86,35 @@ fn pagerank_auto<N>(graph: &DiGraph<N, f64>) -> Vec<f64> {
     let is_unweighted = graph.edge_weights().all(|w| (*w - 1.0).abs() < 1e-12);
     let cfg = PageRankConfig::default();
     if is_unweighted {
-        pagerank(graph, cfg)
+        pagerank_checked(graph, cfg).unwrap_or_else(|_| pagerank(graph, cfg))
     } else {
-        pagerank_weighted(graph, cfg)
+        pagerank_weighted_checked(graph, cfg).unwrap_or_else(|_| pagerank_weighted(graph, cfg))
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ConvergenceReport {
+    iterations: usize,
+    diff_l1: f64,
+    converged: bool,
+}
+
+fn convergence_report(run: &PageRankRun) -> ConvergenceReport {
+    ConvergenceReport {
+        iterations: run.iterations,
+        diff_l1: run.diff_l1,
+        converged: run.converged,
+    }
+}
+
+fn pagerank_auto_run<N>(graph: &DiGraph<N, f64>) -> PageRankRun {
+    let is_unweighted = graph.edge_weights().all(|w| (*w - 1.0).abs() < 1e-12);
+    let cfg = PageRankConfig::default();
+    if is_unweighted {
+        pagerank_checked_run(graph, cfg).unwrap_or_else(|_| pagerank_run(graph, cfg))
+    } else {
+        pagerank_weighted_checked_run(graph, cfg)
+            .unwrap_or_else(|_| pagerank_weighted_run(graph, cfg))
     }
 }
 
@@ -435,6 +468,20 @@ struct AnalyzeArgs {
     /// Output format.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
+
+    /// Print timing + size stats to stderr.
+    ///
+    /// This is modeled after ripgrep's `--stats`: it does not change the primary
+    /// stdout output, it only adds a summary to stderr.
+    #[arg(long, default_value_t = false)]
+    stats: bool,
+
+    /// Limit rows in JSON output (default: unlimited).
+    ///
+    /// This is intentionally separate from `-n/--top` (which is text-only) to avoid
+    /// surprising existing scripts that pass `-n` while consuming JSON.
+    #[arg(long)]
+    json_limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -601,6 +648,73 @@ struct ViewArgs {
     quiet: bool,
 }
 
+#[derive(Parser, Debug, Clone)]
+struct TriageCliArgs {
+    /// Root directory containing the dev super-workspace.
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+
+    /// Artifact directory (relative to root if not absolute).
+    #[arg(long, default_value = "evals/pkgrank")]
+    out: PathBuf,
+
+    /// If required artifacts are missing, re-run `pkgrank view` first.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    refresh_if_missing: bool,
+
+    /// View mode used for refresh.
+    #[arg(long, value_enum, default_value_t = ViewMode::Local)]
+    mode: ViewMode,
+
+    /// Mark artifacts stale if older than this many minutes. Defaults to 60.
+    #[arg(long, default_value_t = 60)]
+    stale_minutes: u64,
+
+    /// Limit returned rows.
+    #[arg(long, default_value_t = 15)]
+    limit: usize,
+
+    /// Optional axis filter for TLC tables.
+    #[arg(long)]
+    axis: Option<String>,
+
+    /// Include PPR aggregate top-k.
+    #[arg(long, default_value_t = 12)]
+    ppr_top: usize,
+
+    /// Summarize READMEs (bounded by the *_top_* limits below). Default: false.
+    #[arg(long, default_value_t = false)]
+    summarize_readmes: bool,
+
+    /// Number of top repos (post-filter) to summarize. Default: 0.
+    #[arg(long, default_value_t = 0)]
+    summarize_repos_top: usize,
+
+    /// Number of top crates (post-filter) to summarize. Default: 0.
+    #[arg(long, default_value_t = 0)]
+    summarize_crates_top: usize,
+
+    /// Max chars of README fed into LLM (default: 12000).
+    #[arg(long, default_value_t = 12_000)]
+    llm_input_max_chars: usize,
+
+    /// Timeout seconds for the LLM command (default: 30).
+    #[arg(long, default_value_t = 30)]
+    llm_timeout_secs: u64,
+
+    /// Cache summaries under `<out>/readme_ai_cache/` (default: true).
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    llm_cache: bool,
+
+    /// Include raw LLM output in triage results (default: false).
+    #[arg(long, default_value_t = false)]
+    llm_include_raw: bool,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum PackageOrigin {
@@ -648,18 +762,332 @@ struct TlcCrateRow {
     repo_git_days_since_last_commit: Option<u64>,
 }
 
+#[cfg(feature = "stdio")]
+fn view_mode_str(m: ViewMode) -> &'static str {
+    match m {
+        ViewMode::Local => "local",
+        ViewMode::CratesIo => "cratesio",
+        ViewMode::Both => "both",
+    }
+}
+
+#[cfg(feature = "stdio")]
+async fn triage_payload_from_cli(args: &TriageCliArgs) -> Result<(serde_json::Value, String)> {
+    let root = args.root.clone();
+    let out = args.out.clone();
+    let refresh_if_missing = args.refresh_if_missing;
+    let stale_minutes = args.stale_minutes.min(60 * 24 * 30);
+    let limit = args.limit.min(100);
+    let axis = args.axis.clone();
+    let ppr_top = args.ppr_top.min(50);
+    let summarize_readmes = args.summarize_readmes;
+    let summarize_repos_top = args.summarize_repos_top.min(25);
+    let summarize_crates_top = args.summarize_crates_top.min(25);
+    let llm_input_max_chars = args.llm_input_max_chars.min(80_000);
+    let llm_timeout_secs = args.llm_timeout_secs.min(600);
+    let llm_cache = args.llm_cache;
+    let llm_include_raw = args.llm_include_raw;
+    let mode = args.mode;
+
+    let tlc_crates_path = PkgrankStdioMcpFull::artifact_path(&root, &out, "tlc.crates.json");
+    let tlc_repos_path = PkgrankStdioMcpFull::artifact_path(&root, &out, "tlc.repos.json");
+    let inv_path =
+        PkgrankStdioMcpFull::artifact_path(&root, &out, "ecosystem.invariants.violations.json");
+    let ppr_agg_path = PkgrankStdioMcpFull::artifact_path(&root, &out, "ppr.aggregate.json");
+
+    let required = [
+        ("tlc.crates.json", &tlc_crates_path),
+        ("tlc.repos.json", &tlc_repos_path),
+        ("ecosystem.invariants.violations.json", &inv_path),
+        ("ppr.aggregate.json", &ppr_agg_path),
+    ];
+    let mut missing = Vec::new();
+    for (name, p) in required {
+        if !p.exists() {
+            missing.push(name.to_string());
+        }
+    }
+    let missing_before_refresh = missing.clone();
+
+    let mut refreshed = false;
+    if refresh_if_missing && !missing.is_empty() {
+        let args = ViewArgs {
+            root: root.clone(),
+            out: out.clone(),
+            mode,
+            local_top: 10,
+            cratesio_depth: 2,
+            cratesio_dev: false,
+            cratesio_build: false,
+            cratesio_optional: false,
+            quiet: true,
+        };
+        run_view(&args)?;
+        refreshed = true;
+        missing.clear();
+        for (name, p) in [
+            ("tlc.crates.json", &tlc_crates_path),
+            ("tlc.repos.json", &tlc_repos_path),
+            ("ecosystem.invariants.violations.json", &inv_path),
+            ("ppr.aggregate.json", &ppr_agg_path),
+        ] {
+            if !p.exists() {
+                missing.push(name.to_string());
+            }
+        }
+    }
+
+    let mut crates: Vec<TlcCrateRow> =
+        PkgrankStdioMcpFull::read_json_file(&tlc_crates_path).map_err(|e| anyhow!(e.message))?;
+    let mut repos: Vec<TlcRepoRow> =
+        PkgrankStdioMcpFull::read_json_file(&tlc_repos_path).map_err(|e| anyhow!(e.message))?;
+    let violations: Vec<RepoInvariantViolation> =
+        PkgrankStdioMcpFull::read_json_file(&inv_path).map_err(|e| anyhow!(e.message))?;
+    let ppr_agg: Vec<(String, f64)> =
+        PkgrankStdioMcpFull::read_json_file(&ppr_agg_path).map_err(|e| anyhow!(e.message))?;
+
+    if let Some(ax) = axis.as_ref() {
+        crates.retain(|r| &r.axis == ax);
+        repos.retain(|r| &r.axis == ax);
+    }
+
+    let violations_sample = violations.iter().take(10).collect::<Vec<_>>();
+    let violation_rules_top = summarize_violation_rules(&violations, 5);
+    let artifacts = serde_json::json!({
+        "tlc_crates": {
+            "path": tlc_crates_path.display().to_string(),
+            "age_minutes": file_age_minutes(&tlc_crates_path),
+            "stale": file_age_minutes(&tlc_crates_path).map(|m| m >= stale_minutes),
+        },
+        "tlc_repos": {
+            "path": tlc_repos_path.display().to_string(),
+            "age_minutes": file_age_minutes(&tlc_repos_path),
+            "stale": file_age_minutes(&tlc_repos_path).map(|m| m >= stale_minutes),
+        },
+        "invariants": {
+            "path": inv_path.display().to_string(),
+            "age_minutes": file_age_minutes(&inv_path),
+            "stale": file_age_minutes(&inv_path).map(|m| m >= stale_minutes),
+        },
+        "ppr_aggregate": {
+            "path": ppr_agg_path.display().to_string(),
+            "age_minutes": file_age_minutes(&ppr_agg_path),
+            "stale": file_age_minutes(&ppr_agg_path).map(|m| m >= stale_minutes),
+        },
+    });
+    let artifact_ages = [
+        file_age_minutes(&tlc_crates_path),
+        file_age_minutes(&tlc_repos_path),
+        file_age_minutes(&inv_path),
+        file_age_minutes(&ppr_agg_path),
+    ];
+    let max_age = artifact_ages.iter().copied().flatten().max();
+    let stale_any = artifact_ages
+        .iter()
+        .copied()
+        .flatten()
+        .any(|m| m >= stale_minutes);
+
+    let mut readme_ai_repos: Vec<serde_json::Value> = Vec::new();
+    let mut readme_ai_crates: Vec<serde_json::Value> = Vec::new();
+    if summarize_readmes && (summarize_repos_top > 0 || summarize_crates_top > 0) {
+        for r in repos.iter().take(summarize_repos_top) {
+            let readme_path = find_readme_for_repo(&root, &r.repo);
+            let ai = maybe_add_readme_llm_summary(
+                &root,
+                &out,
+                "repo",
+                &r.repo,
+                readme_path.as_ref(),
+                true,
+                llm_input_max_chars,
+                llm_timeout_secs,
+                llm_cache,
+            )
+            .await?;
+            let parsed = ai.get("parsed").cloned().unwrap_or(serde_json::Value::Null);
+            let raw = ai.get("raw").cloned().unwrap_or(serde_json::Value::Null);
+            readme_ai_repos.push(serde_json::json!({
+                "repo": r.repo,
+                "axis": r.axis,
+                "tlc_score": r.score,
+                "available": ai.get("available").cloned().unwrap_or(serde_json::Value::Null),
+                "cached": ai.get("cached").cloned().unwrap_or(serde_json::Value::Null),
+                "reason": ai.get("reason").cloned().unwrap_or(serde_json::Value::Null),
+                "parsed": parsed,
+                "raw": if llm_include_raw { raw } else { serde_json::Value::Null },
+            }));
+        }
+        for c in crates.iter().take(summarize_crates_top) {
+            let readme_path = find_readme_for_manifest(&root, &c.manifest_path);
+            let ai = maybe_add_readme_llm_summary(
+                &root,
+                &out,
+                "crate",
+                &c.name,
+                readme_path.as_ref(),
+                true,
+                llm_input_max_chars,
+                llm_timeout_secs,
+                llm_cache,
+            )
+            .await?;
+            let parsed = ai.get("parsed").cloned().unwrap_or(serde_json::Value::Null);
+            let raw = ai.get("raw").cloned().unwrap_or(serde_json::Value::Null);
+            readme_ai_crates.push(serde_json::json!({
+                "crate": c.name,
+                "repo": c.repo,
+                "axis": c.axis,
+                "tlc_score": c.score,
+                "available": ai.get("available").cloned().unwrap_or(serde_json::Value::Null),
+                "cached": ai.get("cached").cloned().unwrap_or(serde_json::Value::Null),
+                "reason": ai.get("reason").cloned().unwrap_or(serde_json::Value::Null),
+                "parsed": parsed,
+                "raw": if llm_include_raw { raw } else { serde_json::Value::Null },
+            }));
+        }
+    }
+
+    let payload = serde_json::json!({
+        "ok": true,
+        "root": root.display().to_string(),
+        "out_dir": if out.is_absolute() { out.display().to_string() } else { root.join(&out).display().to_string() },
+        "artifacts": artifacts,
+        "filters": {
+            "axis": axis,
+            "limit": limit,
+            "ppr_top": ppr_top,
+            "stale_minutes": stale_minutes,
+            "refresh_if_missing": refresh_if_missing,
+            "mode": view_mode_str(mode),
+            "summarize_readmes": summarize_readmes,
+            "summarize_repos_top": summarize_repos_top,
+            "summarize_crates_top": summarize_crates_top,
+            "llm_input_max_chars": llm_input_max_chars,
+            "llm_timeout_secs": llm_timeout_secs,
+            "llm_cache": llm_cache,
+            "llm_include_raw": llm_include_raw,
+        },
+        "summary": {
+            "text": {
+                "top_repos": format_top_tlc_repos(&repos, 8),
+                "top_crates": format_top_tlc_crates(&crates, 8),
+            },
+            "staleness": {
+                "stale_any": stale_any,
+                "max_age_minutes": max_age,
+            },
+            "violations": violations.len(),
+            "violations_sample": violations_sample,
+            "violation_rules_top": violation_rules_top,
+            "top_ppr": ppr_agg.iter().take(ppr_top).collect::<Vec<_>>(),
+            "refreshed": refreshed,
+            "missing_before_refresh": missing_before_refresh,
+            "missing_after_refresh": missing,
+        },
+        "readme_ai": {
+            "repos": readme_ai_repos,
+            "crates": readme_ai_crates,
+        },
+        "tlc": {
+            "crates": crates.into_iter().take(limit).collect::<Vec<_>>(),
+            "repos": repos.into_iter().take(limit).collect::<Vec<_>>(),
+        }
+    });
+
+    let mut summary = String::new();
+    let _ = writeln!(
+        &mut summary,
+        "pkgrank triage (axis={:?}) stale_any={} max_age_minutes={:?} refreshed={} missing_after_refresh={:?}",
+        args.axis,
+        stale_any,
+        max_age,
+        refreshed,
+        payload
+            .get("summary")
+            .and_then(|s| s.get("missing_after_refresh"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    );
+    let _ = writeln!(&mut summary);
+    let _ = writeln!(&mut summary, "Top repos:");
+    let _ = writeln!(
+        &mut summary,
+        "{}",
+        payload
+            .get("summary")
+            .and_then(|s| s.get("text"))
+            .and_then(|t| t.get("top_repos"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+    );
+    let _ = writeln!(&mut summary);
+    let _ = writeln!(&mut summary, "Top crates:");
+    let _ = writeln!(
+        &mut summary,
+        "{}",
+        payload
+            .get("summary")
+            .and_then(|s| s.get("text"))
+            .and_then(|t| t.get("top_crates"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+    );
+    let _ = writeln!(&mut summary);
+    let _ = writeln!(
+        &mut summary,
+        "Invariant rule counts (top): {:?}",
+        violation_rules_top
+    );
+
+    Ok((payload, summary))
+}
+
+fn run_triage(args: &TriageCliArgs) -> Result<()> {
+    #[cfg(feature = "stdio")]
+    {
+        let rt = tokio::runtime::Runtime::new().context("failed to build tokio runtime")?;
+        let (payload, summary_text) = rt.block_on(triage_payload_from_cli(args))?;
+        match args.format {
+            OutputFormat::Json => {
+                let out = serde_json::json!({
+                    "schema_version": 1,
+                    "ok": true,
+                    "command": "triage",
+                    "summary_text": summary_text,
+                    "result": payload,
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            }
+            OutputFormat::Text => {
+                print!("{summary_text}");
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(feature = "stdio"))]
+    {
+        let _ = args;
+        anyhow::bail!("triage requires feature `stdio` (rebuild pkgrank with default features)");
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    match cli.command {
-        None => run_analyze(&cli.analyze),
-        Some(Command::SweepLocal(args)) => run_sweep_local(&args),
-        Some(Command::CratesIo(args)) => run_cratesio(&args),
-        Some(Command::Modules(args)) => run_modules(&args),
-        Some(Command::ModulesSweep(args)) => run_modules_sweep(&args),
-        Some(Command::View(args)) => run_view(&args),
-        Some(Command::McpStdio) => run_mcp_stdio(),
-    }?;
+    let (command_name, result): (&str, Result<()>) = match cli.command {
+        None => ("analyze", run_analyze(&cli.analyze)),
+        Some(Command::SweepLocal(args)) => ("sweep-local", run_sweep_local(&args)),
+        Some(Command::CratesIo(args)) => ("cratesio", run_cratesio(&args)),
+        Some(Command::Modules(args)) => ("modules", run_modules(&args)),
+        Some(Command::ModulesSweep(args)) => ("modules-sweep", run_modules_sweep(&args)),
+        Some(Command::View(args)) => ("view", run_view(&args)),
+        Some(Command::Triage(args)) => ("triage", run_triage(&args)),
+        Some(Command::McpStdio) => ("mcp-stdio", run_mcp_stdio()),
+    };
+
+    let _ = command_name; // reserved for future CLI stats/logging
+    result?;
 
     Ok(())
 }
@@ -941,15 +1369,14 @@ fn run_modules_sweep(args: &ModulesSweepArgs) -> Result<()> {
                             .map(|x| format!("{}({:.3})", x.node, x.betweenness))
                             .unwrap_or_else(|| "-".to_string());
                         println!(
-                            "{:<14} {:>6} {:>5} {:>5}  {:>10}  {:>10}  {:>10}  {}",
+                            "{:<14} {:>6} {:>5} {:>5}  {:>10}  {:>10}  {:>10}",
                             ok.pkg,
                             "ok",
                             ok.nodes,
                             ok.edges,
                             truncate_cell(&top_pr, 10),
                             truncate_cell(&top_cons, 10),
-                            truncate_cell(&top_between, 10),
-                            ""
+                            truncate_cell(&top_between, 10)
                         );
                     }
                     SweepOne::Err(er) => {
@@ -970,33 +1397,33 @@ fn run_modules_sweep(args: &ModulesSweepArgs) -> Result<()> {
             }
 
             if args.summary_only {
-                return Ok(());
-            }
-
-            // Full per-package sections.
-            for r in &results {
-                match r {
-                    SweepOne::Ok(ok) => {
-                        println!("\n{:═<110}", "");
-                        println!("package: {}", ok.pkg);
-                        print_modules_text(
-                            &ok.args,
-                            &ok.rows,
-                            ok.nodes,
-                            ok.edges,
-                            &ok.aggregate_label,
-                            &ok.top_edges,
-                        );
-                    }
-                    SweepOne::Err(er) => {
-                        println!("\n{:═<110}", "");
-                        println!("package: {}", er.pkg);
-                        println!("status:  error");
-                        println!("error:\n{}", er.err.trim());
+                Ok(())
+            } else {
+                // Full per-package sections.
+                for r in &results {
+                    match r {
+                        SweepOne::Ok(ok) => {
+                            println!("\n{:═<110}", "");
+                            println!("package: {}", ok.pkg);
+                            print_modules_text(
+                                &ok.args,
+                                &ok.rows,
+                                ok.nodes,
+                                ok.edges,
+                                &ok.aggregate_label,
+                                &ok.top_edges,
+                            );
+                        }
+                        SweepOne::Err(er) => {
+                            println!("\n{:═<110}", "");
+                            println!("package: {}", er.pkg);
+                            println!("status:  error");
+                            println!("error:\n{}", er.err.trim());
+                        }
                     }
                 }
+                Ok(())
             }
-            Ok(())
         }
     }
 }
@@ -1076,6 +1503,7 @@ fn run_modules(args: &ModulesArgs) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::type_complexity)]
 fn run_modules_core(
     args: &ModulesArgs,
 ) -> Result<(
@@ -1093,16 +1521,21 @@ fn run_modules_core(
     cmd.args(["--manifest-path", &args.manifest_path.to_string_lossy()]);
 
     // cargo-modules requires --package when `--manifest-path` points at a workspace.
-    // Heuristic: default to the manifest's parent directory name (works for the common
-    // layout `repo-or-crate/Cargo.toml`).
-    let inferred_pkg = args
-        .manifest_path
-        .parent()
-        .and_then(|p| p.file_name())
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_string());
-
-    let selected_pkg: Option<String> = args.package.clone().or(inferred_pkg);
+    // Do not guess a package name: it's often wrong (workspace roots, repo folder names, etc).
+    // Instead, fail fast with an actionable message.
+    let selected_pkg: Option<String> = args.package.clone();
+    if selected_pkg.is_none() {
+        // Cheap heuristic: if the manifest text contains `[workspace]`, cargo-modules will require `-p`.
+        // Even when it doesn't, requiring an explicit `package` is clearer than guessing.
+        if let Ok(raw) = fs::read_to_string(&args.manifest_path) {
+            if raw.contains("[workspace]") {
+                anyhow::bail!(
+                    "cargo-modules requires an explicit package when analyzing a workspace manifest.\n\
+                     Fix: pass `--package <crate>` (or point `--manifest-path` at the crate's Cargo.toml)."
+                );
+            }
+        }
+    }
     if let Some(pkg) = &selected_pkg {
         cmd.args(["-p", pkg]);
     }
@@ -1202,7 +1635,7 @@ fn run_modules_core(
     let (g2, members_map, aggregate_label) = if matches!(args.aggregate, ModuleAggregate::Node) {
         (g, None, "node".to_string())
     } else if matches!(args.aggregate, ModuleAggregate::Module) {
-        let (ng, labels) = contract_graph(&g, |name| owning_module(name));
+        let (ng, labels) = contract_graph(&g, owning_module);
         (ng, Some(labels), "module".to_string())
     } else {
         // File aggregation must be anchored to the *package*, not the workspace root.
@@ -1324,6 +1757,7 @@ fn run_modules_core(
             top_edges.push((u, v, w));
         }
         top_edges.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        top_edges.truncate(args.edges_top);
     }
 
     Ok((
@@ -1576,8 +2010,8 @@ fn print_modules_text(
 
     // Header row: show all scalar signals; humans can pick what they care about.
     println!(
-        "{:>4}  {:>10} {:>10} {:>9} {:>6} {:>6} {:>3} {:>3}  {:<10} {:<8} {}",
-        "rank", "pr", "cons_pr", "between", "depsT", "consT", "in", "out", "kind", "vis", "node"
+        "{:>4}  {:>10} {:>10} {:>9} {:>6} {:>6} {:>3} {:>3}  {:<10} {:<8} node",
+        "rank", "pr", "cons_pr", "between", "depsT", "consT", "in", "out", "kind", "vis"
     );
     println!("{:─<110}", "");
 
@@ -1911,22 +2345,14 @@ fn parse_cargo_modules_dot(
 fn parse_cargo_modules_node_line(line: &str) -> Option<(String, CargoModulesNodeMeta)> {
     // Example:
     //   "pkgrank::AnalyzeArgs" [label="pub(crate) struct|AnalyzeArgs", ...]; // "struct" node
-    let Some(s1) = line.find('"') else {
-        return None;
-    };
+    let s1 = line.find('"')?;
     let rest = &line[s1 + 1..];
-    let Some(e1) = rest.find('"') else {
-        return None;
-    };
+    let e1 = rest.find('"')?;
     let id = rest[..e1].to_string();
 
-    let Some(li) = line.find("label=\"") else {
-        return None;
-    };
+    let li = line.find("label=\"")?;
     let restl = &line[li + "label=\"".len()..];
-    let Some(le) = restl.find('"') else {
-        return None;
-    };
+    let le = restl.find('"')?;
     let label = &restl[..le];
     // label is "crate|pkgrank" OR "pub(crate) struct|AnalyzeArgs"
     let (header, _body) = label.split_once('|').unwrap_or((label, ""));
@@ -1960,12 +2386,23 @@ fn parse_cargo_modules_node_line(line: &str) -> Option<(String, CargoModulesNode
 }
 
 fn run_analyze(args: &AnalyzeArgs) -> Result<()> {
+    let started_at = Instant::now();
     let manifest_path = manifest_path(&args.path)?;
+    let t_metadata = Instant::now();
     let metadata = metadata_for(&manifest_path, args)
         .with_context(|| format!("cargo metadata failed for {}", manifest_path.display()))?;
+    let dt_metadata = t_metadata.elapsed();
 
-    let (graph, nodes) = build_graph(&metadata, args)?;
-    let rows = compute_rows(&metadata, &graph, &nodes);
+    let t_graph = Instant::now();
+    let (graph, _nodes) = build_graph(&metadata, args)?;
+    let dt_graph = t_graph.elapsed();
+
+    let t_score = Instant::now();
+    let (mut rows, convergence) = compute_rows_with_convergence(&metadata, &graph);
+    sort_rows_by_metric(&mut rows, args.metric);
+    let dt_score = t_score.elapsed();
+
+    let mut bytes_printed: Option<u64> = None;
 
     match args.format {
         OutputFormat::Json => {
@@ -1974,15 +2411,35 @@ fn run_analyze(args: &AnalyzeArgs) -> Result<()> {
                 schema_version: u32,
                 ok: bool,
                 command: &'a str,
+                metric: String,
+                sorted_by: String,
+                rows_total: usize,
+                rows_returned: usize,
+                truncated: bool,
+                json_limit: Option<usize>,
+                convergence: serde_json::Value,
                 rows: Vec<Row>,
             }
+            let rows_total = rows.len();
+            let limit = args.json_limit.unwrap_or(rows_total);
+            let rows_returned = rows_total.min(limit);
+            let rows = rows.into_iter().take(limit).collect::<Vec<_>>();
             let out = AnalyzeJsonOut {
                 schema_version: 1,
                 ok: true,
                 command: "analyze",
+                metric: format!("{:?}", args.metric),
+                sorted_by: format!("{:?}", args.metric),
+                rows_total,
+                rows_returned,
+                truncated: rows_returned < rows_total,
+                json_limit: args.json_limit,
+                convergence,
                 rows,
             };
-            println!("{}", serde_json::to_string_pretty(&out)?);
+            let s = serde_json::to_string_pretty(&out)?;
+            bytes_printed = Some(s.len() as u64);
+            println!("{s}");
         }
         OutputFormat::Text => print_text(
             &rows,
@@ -1993,7 +2450,107 @@ fn run_analyze(args: &AnalyzeArgs) -> Result<()> {
         ),
     }
 
+    if args.stats {
+        let stats = PkgrankStatsSummary {
+            command: "analyze",
+            node_count: graph.node_count() as u64,
+            edge_count: graph.edge_count() as u64,
+            package_count_total: metadata.packages.len() as u64,
+            package_count_workspace: metadata.workspace_members.len() as u64,
+            bytes_printed,
+            elapsed_metadata: dt_metadata,
+            elapsed_build_graph: dt_graph,
+            elapsed_score: dt_score,
+            elapsed_total: started_at.elapsed(),
+        };
+        let _ = print_pkgrank_stats(args.format, &stats);
+    }
+
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct PkgrankStatsSummary<'a> {
+    command: &'a str,
+    node_count: u64,
+    edge_count: u64,
+    package_count_total: u64,
+    package_count_workspace: u64,
+    bytes_printed: Option<u64>,
+    #[serde(skip)]
+    elapsed_metadata: Duration,
+    #[serde(skip)]
+    elapsed_build_graph: Duration,
+    #[serde(skip)]
+    elapsed_score: Duration,
+    #[serde(skip)]
+    elapsed_total: Duration,
+}
+
+fn print_pkgrank_stats(
+    format: OutputFormat,
+    stats: &PkgrankStatsSummary<'_>,
+) -> std::io::Result<()> {
+    // IMPORTANT: keep stats on stderr so stdout remains a stable artifact surface.
+    if matches!(format, OutputFormat::Json) {
+        // Mirror ripgrep's "summary" JSON convention: machine-readable, one object.
+        let out = serde_json::json!({
+            "type": "pkgrank_stats",
+            "data": {
+                "command": stats.command,
+                "graph": {
+                    "nodes": stats.node_count,
+                    "edges": stats.edge_count,
+                },
+                "packages": {
+                    "total": stats.package_count_total,
+                    "workspace": stats.package_count_workspace,
+                },
+                "bytes_printed": stats.bytes_printed,
+                "elapsed": {
+                    "metadata_human": format!("{:0.6}s", stats.elapsed_metadata.as_secs_f64()),
+                    "build_graph_human": format!("{:0.6}s", stats.elapsed_build_graph.as_secs_f64()),
+                    "score_human": format!("{:0.6}s", stats.elapsed_score.as_secs_f64()),
+                    "total_human": format!("{:0.6}s", stats.elapsed_total.as_secs_f64()),
+                    "total_secs": stats.elapsed_total.as_secs(),
+                    "total_nanos": stats.elapsed_total.subsec_nanos(),
+                }
+            }
+        });
+        eprintln!(
+            "{}",
+            serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string())
+        );
+        Ok(())
+    } else {
+        eprintln!(
+            "
+pkgrank stats
+command: {command}
+packages: {pkg_total} total ({pkg_ws} workspace)
+graph: {nodes} nodes, {edges} edges
+bytes printed: {bytes_printed}
+{t_meta:0.6} seconds cargo metadata
+{t_graph:0.6} seconds build graph
+{t_score:0.6} seconds score centrality
+{t_total:0.6} seconds total
+",
+            command = stats.command,
+            pkg_total = stats.package_count_total,
+            pkg_ws = stats.package_count_workspace,
+            nodes = stats.node_count,
+            edges = stats.edge_count,
+            bytes_printed = stats
+                .bytes_printed
+                .map(|b| b.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            t_meta = stats.elapsed_metadata.as_secs_f64(),
+            t_graph = stats.elapsed_build_graph.as_secs_f64(),
+            t_score = stats.elapsed_score.as_secs_f64(),
+            t_total = stats.elapsed_total.as_secs_f64(),
+        );
+        Ok(())
+    }
 }
 
 fn run_mcp_stdio() -> Result<()> {
@@ -2003,15 +2560,60 @@ fn run_mcp_stdio() -> Result<()> {
     {
         let rt = tokio::runtime::Runtime::new().context("failed to build tokio runtime")?;
         rt.block_on(async {
-            let service = PkgrankStdioMcp::new();
-            let running = service
-                .serve(stdio())
-                .await
-                .context("failed to start stdio MCP server")?;
-            let _ = running
-                .waiting()
-                .await
-                .context("stdio MCP server task join failed")?;
+            let toolset_raw =
+                std::env::var("PKGRANK_MCP_TOOLSET").unwrap_or_else(|_| "slim".to_string());
+            let toolset = toolset_raw.trim().to_ascii_lowercase();
+
+            // Default should "just work": keep tool surface small unless explicitly opted-in.
+            match toolset.as_str() {
+                "" | "slim" | "minimal" => {
+                    let service = PkgrankStdioMcpSlim::new();
+                    let running = service
+                        .serve(stdio())
+                        .await
+                        .context("failed to start stdio MCP server (toolset=slim)")?;
+                    let _ = running
+                        .waiting()
+                        .await
+                        .context("stdio MCP server task join failed (toolset=slim)")?;
+                }
+                "full" => {
+                    let service = PkgrankStdioMcpFull::new();
+                    let running = service
+                        .serve(stdio())
+                        .await
+                        .context("failed to start stdio MCP server (toolset=full)")?;
+                    let _ = running
+                        .waiting()
+                        .await
+                        .context("stdio MCP server task join failed (toolset=full)")?;
+                }
+                "debug" => {
+                    let service = PkgrankStdioMcpDebug::new();
+                    let running = service
+                        .serve(stdio())
+                        .await
+                        .context("failed to start stdio MCP server (toolset=debug)")?;
+                    let _ = running
+                        .waiting()
+                        .await
+                        .context("stdio MCP server task join failed (toolset=debug)")?;
+                }
+                other => {
+                    eprintln!(
+                        "warning: PKGRANK_MCP_TOOLSET must be one of: slim, full, debug (got {other}); defaulting to slim"
+                    );
+                    let service = PkgrankStdioMcpSlim::new();
+                    let running = service
+                        .serve(stdio())
+                        .await
+                        .context("failed to start stdio MCP server (toolset=slim)")?;
+                    let _ = running
+                        .waiting()
+                        .await
+                        .context("stdio MCP server task join failed (toolset=slim)")?;
+                }
+            }
             Ok::<(), anyhow::Error>(())
         })?;
         Ok(())
@@ -2024,9 +2626,9 @@ fn run_mcp_stdio() -> Result<()> {
     }
 }
 
-fn manifest_path(path: &PathBuf) -> Result<PathBuf> {
+fn manifest_path(path: &Path) -> Result<PathBuf> {
     if path.is_file() {
-        return Ok(path.clone());
+        return Ok(path.to_path_buf());
     }
     Ok(path.join("Cargo.toml"))
 }
@@ -2229,6 +2831,101 @@ fn compute_rows(
     rows
 }
 
+fn compute_rows_with_convergence(
+    metadata: &Metadata,
+    graph: &DiGraph<PackageId, f64>,
+) -> (Vec<Row>, serde_json::Value) {
+    let pkg_by_id: HashMap<&PackageId, &cargo_metadata::Package> =
+        metadata.packages.iter().map(|p| (&p.id, p)).collect();
+
+    let workspace: HashSet<&PackageId> = metadata.workspace_members.iter().collect();
+
+    let pr_run = pagerank_auto_run(graph);
+    let consumers_run = pagerank_auto_run(&reverse_graph(graph));
+    let betweenness = betweenness_centrality(graph);
+
+    let pr = pr_run.scores.clone();
+    let consumers_pr = consumers_run.scores.clone();
+
+    let mut rows = Vec::with_capacity(graph.node_count());
+    for node in graph.node_indices() {
+        let id = graph.node_weight(node).expect("node weight").clone();
+        let pkg = pkg_by_id
+            .get(&id)
+            .copied()
+            .unwrap_or_else(|| panic!("missing package for id {}", id));
+
+        let in_degree = graph.neighbors_directed(node, Direction::Incoming).count();
+        let out_degree = graph.neighbors_directed(node, Direction::Outgoing).count();
+
+        let origin = if workspace.contains(&id) {
+            PackageOrigin::WorkspaceMember
+        } else if pkg.source.is_none() {
+            PackageOrigin::Path
+        } else {
+            let s = pkg
+                .source
+                .as_ref()
+                .map(|x| x.to_string())
+                .unwrap_or_default();
+            if s.starts_with("registry+") {
+                PackageOrigin::Registry
+            } else if s.starts_with("git+") {
+                PackageOrigin::Git
+            } else {
+                PackageOrigin::Other
+            }
+        };
+
+        rows.push(Row {
+            id: id.to_string(),
+            name: pkg.name.to_string(),
+            version: pkg.version.to_string(),
+            manifest_path: pkg.manifest_path.to_string(),
+            origin,
+            in_degree,
+            out_degree,
+            pagerank: pr[node.index()],
+            consumers_pagerank: consumers_pr[node.index()],
+            betweenness: betweenness[node.index()],
+        });
+    }
+
+    // Note: sorting for presentation is a policy choice.
+    // We sort by the requested metric elsewhere (CLI/MCP), but keep a deterministic default here.
+    rows.sort_by(|a, b| {
+        b.pagerank
+            .partial_cmp(&a.pagerank)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let convergence = serde_json::json!({
+        "pagerank": convergence_report(&pr_run),
+        "consumers_pagerank": convergence_report(&consumers_run),
+    });
+
+    (rows, convergence)
+}
+
+fn sort_rows_by_metric(rows: &mut [Row], metric: Metric) {
+    rows.sort_by(|a, b| {
+        let ord = match metric {
+            Metric::Pagerank => b.pagerank.partial_cmp(&a.pagerank),
+            Metric::ConsumersPagerank => b.consumers_pagerank.partial_cmp(&a.consumers_pagerank),
+            Metric::Indegree => Some(b.in_degree.cmp(&a.in_degree)),
+            Metric::Outdegree => Some(b.out_degree.cmp(&a.out_degree)),
+            Metric::Betweenness => b.betweenness.partial_cmp(&a.betweenness),
+        }
+        .unwrap_or(std::cmp::Ordering::Equal);
+
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+        // Stable tie-break for determinism.
+        a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id))
+    });
+}
+
 fn print_text(rows: &[Row], metric: Metric, top: usize, nodes: usize, edges: usize) {
     let mut sorted: Vec<&Row> = rows.iter().collect();
     sorted.sort_by(|a, b| match metric {
@@ -2308,13 +3005,8 @@ fn git_repo_stats(repo_dir: &Path) -> GitRepoStats {
             s.trim().parse::<u64>().ok()
         });
 
-    let days_since_last_commit = last_commit_secs.and_then(|t| {
-        if now >= t {
-            Some((now - t) / 86_400)
-        } else {
-            Some(0)
-        }
-    });
+    let days_since_last_commit =
+        last_commit_secs.map(|t| if now >= t { (now - t) / 86_400 } else { 0 });
 
     // commits over last 30 days (fast count)
     let commits_30d = ProcessCommand::new("git")
@@ -2632,6 +3324,8 @@ fn compute_tlc_crates(root: &Path, out_dir: &Path) -> Result<Vec<TlcCrateRow>> {
         no_default_features: false,
         features: None,
         format: OutputFormat::Json,
+        stats: false,
+        json_limit: None,
     };
     let manifest = manifest_path(&analyze.path)?;
     let metadata = metadata_for(&manifest, &analyze)?;
@@ -2682,8 +3376,8 @@ fn compute_tlc_crates(root: &Path, out_dir: &Path) -> Result<Vec<TlcCrateRow>> {
     // - boundary complexity (# unique third-party deps)
     let mut fp_nodes: Vec<usize> = Vec::new();
     let mut fp_index: HashMap<usize, usize> = HashMap::new();
-    for i in 0..idx_to_row.len() {
-        if let Some(r) = idx_to_row[i] {
+    for (i, r) in idx_to_row.iter().enumerate() {
+        if let Some(r) = r {
             if matches!(
                 r.origin,
                 PackageOrigin::WorkspaceMember | PackageOrigin::Path
@@ -2999,6 +3693,8 @@ fn compute_repo_graph_from_live_metadata(
         no_default_features: false,
         features: None,
         format: OutputFormat::Json,
+        stats: false,
+        json_limit: None,
     };
     let manifest_path = manifest_path(&analyze.path)?;
     let metadata = metadata_for(&manifest_path, &analyze)?;
@@ -3399,6 +4095,8 @@ fn write_recent_files_artifacts(
         no_default_features: false,
         features: None,
         format: OutputFormat::Json,
+        stats: false,
+        json_limit: None,
     };
     let rows = analyze_rows(&analyze).unwrap_or_default();
     let mut crate_roots: Vec<(PathBuf, String, String)> = rows
@@ -3607,6 +4305,8 @@ fn run_sweep_local(args: &SweepLocalArgs) -> Result<()> {
                 no_default_features: false,
                 features: None,
                 format: OutputFormat::Json,
+                stats: false,
+                json_limit: None,
             };
             let rows = analyze_rows(&analyze)?;
 
@@ -3719,6 +4419,8 @@ fn run_sweep_local(args: &SweepLocalArgs) -> Result<()> {
                     no_default_features: false,
                     features: None,
                     format: OutputFormat::Json,
+                    stats: false,
+                    json_limit: None,
                 };
 
                 match analyze_rows(&analyze) {
@@ -3784,6 +4486,16 @@ fn analyze_rows(args: &AnalyzeArgs) -> Result<Vec<Row>> {
         .with_context(|| format!("cargo metadata failed for {}", manifest_path.display()))?;
     let (graph, nodes) = build_graph(&metadata, args)?;
     Ok(compute_rows(&metadata, &graph, &nodes))
+}
+
+fn analyze_rows_with_convergence(args: &AnalyzeArgs) -> Result<(Vec<Row>, serde_json::Value)> {
+    let manifest_path = manifest_path(&args.path)?;
+    let metadata = metadata_for(&manifest_path, args)
+        .with_context(|| format!("cargo metadata failed for {}", manifest_path.display()))?;
+    let (graph, _nodes) = build_graph(&metadata, args)?;
+    let (mut rows, convergence) = compute_rows_with_convergence(&metadata, &graph);
+    sort_rows_by_metric(&mut rows, args.metric);
+    Ok((rows, convergence))
 }
 
 #[cfg(feature = "stdio")]
@@ -3909,6 +4621,20 @@ fn modules_args_from_tool_params(p: &PkgrankModulesToolArgs) -> Result<ModulesAr
         args.include_traits = v;
     }
 
+    // Better UX: fail fast with invalid_params (not internal_error) when `package` is required.
+    if args.package.is_none() {
+        if let Ok(raw) = fs::read_to_string(&args.manifest_path) {
+            if raw.contains("[workspace]") {
+                return Err(McpError::invalid_params(
+                    "missing required parameter `package` when `manifest_path` points at a workspace.\n\
+                     Fix: pass `package` (crate name), or set `manifest_path` to the crate's Cargo.toml."
+                        .to_string(),
+                    None,
+                ));
+            }
+        }
+    }
+
     Ok(apply_modules_preset(&args))
 }
 
@@ -3917,12 +4643,25 @@ fn modules_sweep_args_from_tool_params(
     p: &PkgrankModulesSweepToolArgs,
 ) -> Result<ModulesSweepArgs, McpError> {
     let packages = p.packages.clone().unwrap_or_default();
+    // Better UX: if this looks like a workspace, require either explicit packages or all_packages=true.
+    let manifest_path = PathBuf::from(
+        p.manifest_path
+            .clone()
+            .unwrap_or_else(|| "Cargo.toml".to_string()),
+    );
+    if !p.all_packages.unwrap_or(false) && packages.is_empty() {
+        if let Ok(raw) = fs::read_to_string(&manifest_path) {
+            if raw.contains("[workspace]") {
+                return Err(McpError::invalid_params(
+                    "modules-sweep requires either `packages` or `all_packages=true` when `manifest_path` points at a workspace."
+                        .to_string(),
+                    None,
+                ));
+            }
+        }
+    }
     Ok(ModulesSweepArgs {
-        manifest_path: PathBuf::from(
-            p.manifest_path
-                .clone()
-                .unwrap_or_else(|| "Cargo.toml".to_string()),
-        ),
+        manifest_path,
         package: packages,
         all_packages: p.all_packages.unwrap_or(false),
         lib: p.lib.unwrap_or(false),
@@ -4045,6 +4784,7 @@ fn modules_sweep_payload(
         one_args.package = Some(pkg.clone());
         match run_modules_core(&one_args) {
             Ok((mut rows, nodes, edges, aggregate_label, top_edges)) => {
+                let rows_total = rows.len();
                 let top_pr = rows
                     .iter()
                     .max_by(|a, b| {
@@ -4087,6 +4827,8 @@ fn modules_sweep_payload(
                         .partial_cmp(&a.betweenness)
                         .unwrap_or(std::cmp::Ordering::Equal),
                 });
+                let rows_returned = rows_total.min(args.top);
+                let truncated = rows_returned < rows_total;
                 if include_rows {
                     rows.truncate(args.top);
                 }
@@ -4098,6 +4840,10 @@ fn modules_sweep_payload(
                         "nodes": nodes,
                         "edges": edges,
                         "aggregate_label": aggregate_label,
+                        "rows_total": rows_total,
+                        "rows_returned": if include_rows { Some(rows_returned) } else { None },
+                        "truncated": if include_rows { Some(truncated) } else { None },
+                        "limit": if include_rows { Some(args.top) } else { None },
                         "tops": {
                             "pagerank": top_pr,
                             "consumers_pagerank": top_cons,
@@ -4244,6 +4990,8 @@ fn run_cratesio(args: &CratesIoArgs) -> Result<()> {
             no_default_features: false,
             features: None,
             format: OutputFormat::Json,
+            stats: false,
+            json_limit: None,
         };
         let rows = analyze_rows(&analyze)?;
         let mut uniq = HashSet::new();
@@ -4508,6 +5256,8 @@ fn run_view(args: &ViewArgs) -> Result<()> {
             no_default_features: false,
             features: None,
             format: OutputFormat::Json,
+            stats: false,
+            json_limit: None,
         };
         Some(analyze_rows(&analyze)?)
     } else {
@@ -5079,7 +5829,7 @@ fn p_display(root: &Path, p: Option<&PathBuf>) -> Option<String> {
 
 // --- MCP stdio server (Cursor integration) ---
 //
-// Mirrors `iksh mcp-stdio`:
+// Mirrors `threadlog mcp-stdio`:
 // - keep stdout clean (transport)
 // - return JSON payloads as Content::text
 // - keep tool surface small and stable
@@ -5090,11 +5840,265 @@ struct PkgrankStdioMcpFull {
     tool_router: RmcpToolRouter<Self>,
 }
 
-// Default to slim tool surface; opt into full via `mcp-debug`.
-#[cfg(all(feature = "stdio", feature = "mcp-debug"))]
-type PkgrankStdioMcp = PkgrankStdioMcpFull;
-#[cfg(all(feature = "stdio", not(feature = "mcp-debug")))]
-type PkgrankStdioMcp = PkgrankStdioMcpSlim;
+// Toolset selection is runtime via `PKGRANK_MCP_TOOLSET` (default: slim).
+
+#[cfg(feature = "stdio")]
+#[derive(Clone)]
+#[allow(dead_code)]
+struct PkgrankStdioMcpDebug {
+    tool_router: RmcpToolRouter<Self>,
+}
+
+#[cfg(feature = "stdio")]
+#[tool_router]
+impl PkgrankStdioMcpDebug {
+    #[allow(dead_code)]
+    fn new() -> Self {
+        Self {
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    // Debug toolset: include the full surface plus internal artifact inspection tools.
+    // Delegate “full” tools to `PkgrankStdioMcpFull` to avoid duplicating logic.
+
+    #[tool(description = "Check pkgrank artifact status (what exists, where, and basic metadata)")]
+    async fn pkgrank_status(
+        &self,
+        params: Parameters<PkgrankViewToolArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        PkgrankStdioMcpFull::new().pkgrank_status(params).await
+    }
+
+    #[tool(description = "Generate pkgrank HTML/JSON artifacts (pkgrank view)")]
+    async fn pkgrank_view(
+        &self,
+        params: Parameters<PkgrankViewToolArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        PkgrankStdioMcpFull::new().pkgrank_view(params).await
+    }
+
+    #[tool(
+        description = "Triage bundle: top TLC crates/repos + invariants + PPR top-k (artifact-backed)"
+    )]
+    async fn pkgrank_triage(
+        &self,
+        params: Parameters<PkgrankTriageArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        PkgrankStdioMcpSlim::new().pkgrank_triage(params).await
+    }
+
+    #[tool(description = "Get repo details from artifacts")]
+    async fn pkgrank_repo_detail(
+        &self,
+        params: Parameters<PkgrankRepoDetailArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        PkgrankStdioMcpFull::new().pkgrank_repo_detail(params).await
+    }
+
+    #[tool(description = "Get crate details from artifacts")]
+    async fn pkgrank_crate_detail(
+        &self,
+        params: Parameters<PkgrankCrateDetailArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        PkgrankStdioMcpFull::new()
+            .pkgrank_crate_detail(params)
+            .await
+    }
+
+    #[tool(description = "Snapshot pkgrank artifacts into a new directory (copy selected files)")]
+    async fn pkgrank_snapshot(
+        &self,
+        params: Parameters<PkgrankSnapshotArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        PkgrankStdioMcpFull::new().pkgrank_snapshot(params).await
+    }
+
+    #[tool(description = "Compare two pkgrank artifact directories (TLC crates/repos deltas)")]
+    async fn pkgrank_compare_runs(
+        &self,
+        params: Parameters<PkgrankCompareRunsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        PkgrankStdioMcpFull::new()
+            .pkgrank_compare_runs(params)
+            .await
+    }
+
+    #[tool(description = "Compute local crate ranking (pkgrank analyze)")]
+    async fn pkgrank_analyze(
+        &self,
+        params: Parameters<PkgrankAnalyzeToolArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        PkgrankStdioMcpFull::new().pkgrank_analyze(params).await
+    }
+
+    #[tool(
+        description = "Compute internal module/item centrality (pkgrank modules; cargo-modules-backed)"
+    )]
+    async fn pkgrank_modules(
+        &self,
+        params: Parameters<PkgrankModulesToolArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        PkgrankStdioMcpFull::new().pkgrank_modules(params).await
+    }
+
+    #[tool(
+        description = "Compute internal module/item centrality across multiple packages (pkgrank modules-sweep)"
+    )]
+    async fn pkgrank_modules_sweep(
+        &self,
+        params: Parameters<PkgrankModulesSweepToolArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        PkgrankStdioMcpFull::new()
+            .pkgrank_modules_sweep(params)
+            .await
+    }
+
+    // --- Internal artifact inspection tools (debug-only) ---
+    // Keep these typed and schema-versioned; they are intentionally not in the default toolset.
+
+    #[tool(description = "Return top TLC crates (artifact-backed) with optional filters (debug)")]
+    async fn pkgrank_tlc_crates(
+        &self,
+        params: Parameters<PkgrankTlcCratesToolArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let root = PkgrankStdioMcpFull::default_root(params.0.root.as_deref());
+        let out = PkgrankStdioMcpFull::default_out(params.0.out.as_deref());
+        let limit = params.0.limit.unwrap_or(25).min(500);
+        let axis = params.0.axis.clone();
+        let repo = params.0.repo.clone();
+
+        let path = PkgrankStdioMcpFull::artifact_path(&root, &out, "tlc.crates.json");
+        let rows: Vec<TlcCrateRow> = PkgrankStdioMcpFull::read_json_file(&path)?;
+        let mut out_rows = Vec::new();
+        for r in rows {
+            if let Some(ax) = axis.as_ref() {
+                if &r.axis != ax {
+                    continue;
+                }
+            }
+            if let Some(rr) = repo.as_ref() {
+                if &r.repo != rr {
+                    continue;
+                }
+            }
+            out_rows.push(r);
+            if out_rows.len() >= limit {
+                break;
+            }
+        }
+        let result = serde_json::json!({
+            "source": path.display().to_string(),
+            "rows": out_rows,
+        });
+        mcp_ok("pkgrank_tlc_crates", result, None)
+    }
+
+    #[tool(description = "Return top TLC repos (artifact-backed) with optional filters (debug)")]
+    async fn pkgrank_tlc_repos(
+        &self,
+        params: Parameters<PkgrankTlcReposToolArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let root = PkgrankStdioMcpFull::default_root(params.0.root.as_deref());
+        let out = PkgrankStdioMcpFull::default_out(params.0.out.as_deref());
+        let limit = params.0.limit.unwrap_or(25).min(500);
+        let axis = params.0.axis.clone();
+
+        let path = PkgrankStdioMcpFull::artifact_path(&root, &out, "tlc.repos.json");
+        let rows: Vec<TlcRepoRow> = PkgrankStdioMcpFull::read_json_file(&path)?;
+        let mut out_rows = Vec::new();
+        for r in rows {
+            if let Some(ax) = axis.as_ref() {
+                if &r.axis != ax {
+                    continue;
+                }
+            }
+            out_rows.push(r);
+            if out_rows.len() >= limit {
+                break;
+            }
+        }
+        let result = serde_json::json!({
+            "source": path.display().to_string(),
+            "rows": out_rows,
+        });
+        mcp_ok("pkgrank_tlc_repos", result, None)
+    }
+
+    #[tool(description = "List invariant violations (artifact-backed) (debug)")]
+    async fn pkgrank_invariants(
+        &self,
+        params: Parameters<PkgrankInvariantsToolArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let root = PkgrankStdioMcpFull::default_root(params.0.root.as_deref());
+        let out = PkgrankStdioMcpFull::default_out(params.0.out.as_deref());
+        let path =
+            PkgrankStdioMcpFull::artifact_path(&root, &out, "ecosystem.invariants.violations.json");
+        let rows: Vec<RepoInvariantViolation> = PkgrankStdioMcpFull::read_json_file(&path)?;
+        let result = serde_json::json!({
+            "source": path.display().to_string(),
+            "violations": rows,
+        });
+        mcp_ok("pkgrank_invariants", result, None)
+    }
+
+    #[tool(description = "Return PPR summaries (artifact-backed) (debug)")]
+    async fn pkgrank_ppr_summary(
+        &self,
+        params: Parameters<PkgrankPprSummaryToolArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let root = PkgrankStdioMcpFull::default_root(params.0.root.as_deref());
+        let out = PkgrankStdioMcpFull::default_out(params.0.out.as_deref());
+        let entry_path = PkgrankStdioMcpFull::artifact_path(&root, &out, "ppr.entrypoints.json");
+        let agg_path = PkgrankStdioMcpFull::artifact_path(&root, &out, "ppr.aggregate.json");
+        let entry: serde_json::Value = PkgrankStdioMcpFull::read_json_file(&entry_path)?;
+        let agg: serde_json::Value = PkgrankStdioMcpFull::read_json_file(&agg_path)?;
+        let result = serde_json::json!({
+            "entrypoints_source": entry_path.display().to_string(),
+            "aggregate_source": agg_path.display().to_string(),
+            "entrypoints": entry,
+            "aggregate": agg,
+        });
+        mcp_ok("pkgrank_ppr_summary", result, None)
+    }
+}
+
+#[cfg(feature = "stdio")]
+#[tool_handler]
+impl rmcp::ServerHandler for PkgrankStdioMcpDebug {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            instructions: Some(
+                "Tools for ranking crates/repos in the local Cargo workspace (pkgrank).\n\n\
+                 Toolsets:\n\
+                 - default: PKGRANK_MCP_TOOLSET=slim (small surface)\n\
+                 - opt-in:  PKGRANK_MCP_TOOLSET=full (includes module/type graph tools)\n\
+                 - opt-in:  PKGRANK_MCP_TOOLSET=debug (full + internal artifact inspection tools)"
+                    .to_string(),
+            ),
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            ..Default::default()
+        }
+    }
+}
+
+#[cfg(feature = "stdio")]
+fn mcp_ok(
+    tool: &str,
+    result: serde_json::Value,
+    summary_text: Option<String>,
+) -> Result<CallToolResult, McpError> {
+    let payload = serde_json::json!({
+        "schema_version": 1,
+        "ok": true,
+        "tool": tool,
+        "summary_text": summary_text,
+        "result": result,
+    });
+    Ok(CallToolResult::success(vec![Content::text(
+        payload.to_string(),
+    )]))
+}
 
 #[cfg(feature = "stdio")]
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -5116,6 +6120,9 @@ struct PkgrankAnalyzeToolArgs {
     /// Path to a Cargo.toml or directory containing one.
     #[serde(default)]
     path: Option<String>,
+    /// Metric to sort by: pagerank, consumers-pagerank, indegree, outdegree, betweenness.
+    #[serde(default)]
+    metric: Option<String>,
     #[serde(default)]
     workspace_only: Option<bool>,
     #[serde(default)]
@@ -5234,6 +6241,52 @@ struct PkgrankModulesSweepToolArgs {
 }
 
 #[cfg(feature = "stdio")]
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PkgrankTlcCratesToolArgs {
+    #[serde(default)]
+    root: Option<String>,
+    #[serde(default)]
+    out: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    axis: Option<String>,
+    #[serde(default)]
+    repo: Option<String>,
+}
+
+#[cfg(feature = "stdio")]
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PkgrankTlcReposToolArgs {
+    #[serde(default)]
+    root: Option<String>,
+    #[serde(default)]
+    out: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    axis: Option<String>,
+}
+
+#[cfg(feature = "stdio")]
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PkgrankInvariantsToolArgs {
+    #[serde(default)]
+    root: Option<String>,
+    #[serde(default)]
+    out: Option<String>,
+}
+
+#[cfg(feature = "stdio")]
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PkgrankPprSummaryToolArgs {
+    #[serde(default)]
+    root: Option<String>,
+    #[serde(default)]
+    out: Option<String>,
+}
+
+#[cfg(feature = "stdio")]
 #[derive(Clone)]
 #[allow(dead_code)] // constructed when `mcp-debug` is ON
 struct PkgrankStdioMcpSlim {
@@ -5301,6 +6354,17 @@ impl PkgrankStdioMcpFull {
         })
     }
 
+    #[tool(
+        description = "Triage bundle: top TLC crates/repos + invariants + PPR top-k (artifact-backed)"
+    )]
+    async fn pkgrank_triage(
+        &self,
+        params: Parameters<PkgrankTriageArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        // Keep triage in all toolsets; delegate to the slim implementation.
+        PkgrankStdioMcpSlim::new().pkgrank_triage(params).await
+    }
+
     #[tool(description = "Check pkgrank artifact status (what exists, where, and basic metadata)")]
     async fn pkgrank_status(
         &self,
@@ -5342,14 +6406,11 @@ impl PkgrankStdioMcpFull {
         }
 
         let payload = serde_json::json!({
-            "ok": true,
             "root": root.display().to_string(),
             "out_dir": out_dir.display().to_string(),
             "files": status,
         });
-        Ok(CallToolResult::success(vec![Content::text(
-            payload.to_string(),
-        )]))
+        mcp_ok("pkgrank_status", payload, None)
     }
 
     #[tool(description = "Generate pkgrank HTML/JSON artifacts (pkgrank view)")]
@@ -5387,121 +6448,11 @@ impl PkgrankStdioMcpFull {
         let html_path = Self::artifact_path(&args.root, &args.out, "pkgrank_overview.html");
 
         let payload = serde_json::json!({
-            "ok": true,
             "root": args.root.display().to_string(),
             "out_dir": if args.out.is_absolute() { args.out.display().to_string() } else { args.root.join(&args.out).display().to_string() },
             "html_path": html_path.display().to_string(),
         });
-        Ok(CallToolResult::success(vec![Content::text(
-            payload.to_string(),
-        )]))
-    }
-
-    #[tool(description = "Return top TLC crates (artifact-backed) with optional filters")]
-    async fn pkgrank_tlc_crates(
-        &self,
-        params: Parameters<serde_json::Value>,
-    ) -> Result<CallToolResult, McpError> {
-        let root = Self::default_root(params.0.get("root").and_then(|x| x.as_str()));
-        let out = Self::default_out(params.0.get("out").and_then(|x| x.as_str()));
-        let limit = params.0.get("limit").and_then(|x| x.as_u64()).unwrap_or(25) as usize;
-        let axis = params
-            .0
-            .get("axis")
-            .and_then(|x| x.as_str())
-            .map(|s| s.to_string());
-        let repo = params
-            .0
-            .get("repo")
-            .and_then(|x| x.as_str())
-            .map(|s| s.to_string());
-
-        let path = Self::artifact_path(&root, &out, "tlc.crates.json");
-        let rows: Vec<TlcCrateRow> = Self::read_json_file(&path)?;
-        let mut out_rows = Vec::new();
-        for r in rows {
-            if let Some(ax) = axis.as_ref() {
-                if &r.axis != ax {
-                    continue;
-                }
-            }
-            if let Some(rr) = repo.as_ref() {
-                if &r.repo != rr {
-                    continue;
-                }
-            }
-            out_rows.push(r);
-            if out_rows.len() >= limit {
-                break;
-            }
-        }
-
-        let payload = serde_json::json!({
-            "ok": true,
-            "source": path.display().to_string(),
-            "rows": out_rows,
-        });
-        Ok(CallToolResult::success(vec![Content::text(
-            payload.to_string(),
-        )]))
-    }
-
-    #[tool(description = "Return top TLC repos (artifact-backed) with optional filters")]
-    async fn pkgrank_tlc_repos(
-        &self,
-        params: Parameters<serde_json::Value>,
-    ) -> Result<CallToolResult, McpError> {
-        let root = Self::default_root(params.0.get("root").and_then(|x| x.as_str()));
-        let out = Self::default_out(params.0.get("out").and_then(|x| x.as_str()));
-        let limit = params.0.get("limit").and_then(|x| x.as_u64()).unwrap_or(25) as usize;
-        let axis = params
-            .0
-            .get("axis")
-            .and_then(|x| x.as_str())
-            .map(|s| s.to_string());
-
-        let path = Self::artifact_path(&root, &out, "tlc.repos.json");
-        let rows: Vec<TlcRepoRow> = Self::read_json_file(&path)?;
-        let mut out_rows = Vec::new();
-        for r in rows {
-            if let Some(ax) = axis.as_ref() {
-                if &r.axis != ax {
-                    continue;
-                }
-            }
-            out_rows.push(r);
-            if out_rows.len() >= limit {
-                break;
-            }
-        }
-
-        let payload = serde_json::json!({
-            "ok": true,
-            "source": path.display().to_string(),
-            "rows": out_rows,
-        });
-        Ok(CallToolResult::success(vec![Content::text(
-            payload.to_string(),
-        )]))
-    }
-
-    #[tool(description = "List invariant violations (artifact-backed)")]
-    async fn pkgrank_invariants(
-        &self,
-        params: Parameters<serde_json::Value>,
-    ) -> Result<CallToolResult, McpError> {
-        let root = Self::default_root(params.0.get("root").and_then(|x| x.as_str()));
-        let out = Self::default_out(params.0.get("out").and_then(|x| x.as_str()));
-        let path = Self::artifact_path(&root, &out, "ecosystem.invariants.violations.json");
-        let rows: Vec<RepoInvariantViolation> = Self::read_json_file(&path)?;
-        let payload = serde_json::json!({
-            "ok": true,
-            "source": path.display().to_string(),
-            "violations": rows,
-        });
-        Ok(CallToolResult::success(vec![Content::text(
-            payload.to_string(),
-        )]))
+        mcp_ok("pkgrank_view", payload, None)
     }
 
     #[tool(description = "Get repo details from artifacts")]
@@ -5541,9 +6492,7 @@ impl PkgrankStdioMcpFull {
         if let Some(obj) = payload.as_object_mut() {
             obj.insert("readme_ai".to_string(), ai);
         }
-        Ok(CallToolResult::success(vec![Content::text(
-            payload.to_string(),
-        )]))
+        mcp_ok("pkgrank_repo_detail", payload, None)
     }
 
     #[tool(description = "Get crate details from artifacts")]
@@ -5589,34 +6538,10 @@ impl PkgrankStdioMcpFull {
         if let Some(obj) = payload.as_object_mut() {
             obj.insert("readme_ai".to_string(), ai);
         }
-        Ok(CallToolResult::success(vec![Content::text(
-            payload.to_string(),
-        )]))
+        mcp_ok("pkgrank_crate_detail", payload, None)
     }
 
-    #[tool(description = "Return PPR summaries (artifact-backed)")]
-    async fn pkgrank_ppr_summary(
-        &self,
-        params: Parameters<serde_json::Value>,
-    ) -> Result<CallToolResult, McpError> {
-        let root = Self::default_root(params.0.get("root").and_then(|x| x.as_str()));
-        let out = Self::default_out(params.0.get("out").and_then(|x| x.as_str()));
-        let entry_path = Self::artifact_path(&root, &out, "ppr.entrypoints.json");
-        let agg_path = Self::artifact_path(&root, &out, "ppr.aggregate.json");
-        let entry: serde_json::Value = Self::read_json_file(&entry_path)?;
-        let agg: serde_json::Value = Self::read_json_file(&agg_path)?;
-
-        let payload = serde_json::json!({
-            "ok": true,
-            "entrypoints_source": entry_path.display().to_string(),
-            "aggregate_source": agg_path.display().to_string(),
-            "entrypoints": entry,
-            "aggregate": agg,
-        });
-        Ok(CallToolResult::success(vec![Content::text(
-            payload.to_string(),
-        )]))
-    }
+    // NOTE: internal artifact inspection tools live in `PkgrankStdioMcpDebug`.
 
     #[tool(description = "Snapshot pkgrank artifacts into a new directory (copy selected files)")]
     async fn pkgrank_snapshot(
@@ -5640,11 +6565,7 @@ impl PkgrankStdioMcpFull {
             PathBuf::from(d)
         } else {
             // Default: `<out>/runs/<label>`
-            if out.is_absolute() {
-                out.join("runs").join(&label)
-            } else {
-                out.join("runs").join(&label)
-            }
+            out.join("runs").join(&label)
         };
 
         let src_dir = if out.is_absolute() {
@@ -5702,7 +6623,6 @@ impl PkgrankStdioMcpFull {
         }
 
         let payload = serde_json::json!({
-            "ok": true,
             "root": root.display().to_string(),
             "source_dir": src_dir.display().to_string(),
             "dest_dir": dst_dir.display().to_string(),
@@ -5710,9 +6630,7 @@ impl PkgrankStdioMcpFull {
             "copied": copied,
             "missing": missing,
         });
-        Ok(CallToolResult::success(vec![Content::text(
-            payload.to_string(),
-        )]))
+        mcp_ok("pkgrank_snapshot", payload, None)
     }
 
     #[tool(description = "Compare two pkgrank artifact directories (TLC crates/repos deltas)")]
@@ -5802,7 +6720,6 @@ impl PkgrankStdioMcpFull {
         });
 
         let payload = serde_json::json!({
-            "ok": true,
             "root": root.display().to_string(),
             "new_out": new_out.display().to_string(),
             "old_out": old_out.display().to_string(),
@@ -5815,9 +6732,7 @@ impl PkgrankStdioMcpFull {
             "crate_rank_deltas": crate_deltas.into_iter().take(limit).collect::<Vec<_>>(),
             "repo_rank_deltas": repo_deltas.into_iter().take(limit).collect::<Vec<_>>(),
         });
-        Ok(CallToolResult::success(vec![Content::text(
-            payload.to_string(),
-        )]))
+        mcp_ok("pkgrank_compare_runs", payload, None)
     }
 
     #[tool(description = "Compute local crate ranking (pkgrank analyze)")]
@@ -5826,9 +6741,16 @@ impl PkgrankStdioMcpFull {
         params: Parameters<PkgrankAnalyzeToolArgs>,
     ) -> Result<CallToolResult, McpError> {
         let path = params.0.path.clone().unwrap_or_else(|| ".".to_string());
+        let metric = params
+            .0
+            .metric
+            .as_deref()
+            .map(parse_metric)
+            .transpose()?
+            .unwrap_or(Metric::Pagerank);
         let analyze = AnalyzeArgs {
             path: PathBuf::from(path),
-            metric: Metric::Pagerank,
+            metric,
             top: params.0.top.unwrap_or(25),
             dev: params.0.dev.unwrap_or(false),
             build: params.0.build.unwrap_or(false),
@@ -5837,16 +6759,26 @@ impl PkgrankStdioMcpFull {
             no_default_features: false,
             features: None,
             format: OutputFormat::Json,
+            stats: false,
+            json_limit: None,
         };
-        let rows = analyze_rows(&analyze)
+        let (rows, convergence) = analyze_rows_with_convergence(&analyze)
             .map_err(|e| McpError::internal_error(format!("{:#}", e), None))?;
+        let rows_total = rows.len();
+        let rows_returned = rows_total.min(analyze.top);
+        let rows = rows.into_iter().take(analyze.top).collect::<Vec<_>>();
+        let truncated = rows_returned < rows_total;
         let payload = serde_json::json!({
-            "ok": true,
             "rows": rows,
+            "rows_total": rows_total,
+            "rows_returned": rows_returned,
+            "truncated": truncated,
+            "limit": analyze.top,
+            "convergence": convergence,
+            "metric": format!("{:?}", metric),
+            "sorted_by": format!("{:?}", metric),
         });
-        Ok(CallToolResult::success(vec![Content::text(
-            payload.to_string(),
-        )]))
+        mcp_ok("pkgrank_analyze", payload, None)
     }
 
     #[tool(
@@ -5856,11 +6788,27 @@ impl PkgrankStdioMcpFull {
         &self,
         params: Parameters<PkgrankModulesToolArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let args = modules_args_from_tool_params(&params.0)?;
-        let (rows, nodes, edges, aggregate_label, top_edges) = run_modules_core(&args)
-            .map_err(|e| McpError::internal_error(format!("{:#}", e), None))?;
+        let mut args = modules_args_from_tool_params(&params.0)?;
+        let (rows, nodes, edges, aggregate_label, top_edges) = match run_modules_core(&args) {
+            Ok(v) => v,
+            Err(e) => {
+                // cargo-modules errors if a package has both --lib and --bin targets and neither
+                // is explicitly selected. For MCP UX, auto-fallback to --lib when it looks safe.
+                let msg = format!("{:#}", e);
+                if !args.lib && args.bin.is_none() && msg.contains("Multiple targets present") {
+                    args.lib = true;
+                    run_modules_core(&args)
+                        .map_err(|e2| McpError::internal_error(format!("{:#}", e2), None))?
+                } else {
+                    return Err(McpError::internal_error(msg, None));
+                }
+            }
+        };
+        let rows_total = rows.len();
+        let rows_returned = rows_total.min(args.top);
+        let rows = rows.into_iter().take(args.top).collect::<Vec<_>>();
+        let truncated = rows_returned < rows_total;
         let payload = serde_json::json!({
-            "ok": true,
             "effective": {
                 "manifest_path": args.manifest_path.display().to_string(),
                 "package": args.package,
@@ -5896,11 +6844,13 @@ impl PkgrankStdioMcpFull {
                 "aggregate_label": aggregate_label,
             },
             "rows": rows,
+            "rows_total": rows_total,
+            "rows_returned": rows_returned,
+            "truncated": truncated,
+            "limit": args.top,
             "top_edges": top_edges,
         });
-        Ok(CallToolResult::success(vec![Content::text(
-            payload.to_string(),
-        )]))
+        mcp_ok("pkgrank_modules", payload, None)
     }
 
     #[tool(
@@ -5915,9 +6865,7 @@ impl PkgrankStdioMcpFull {
         let include_top_edges = params.0.include_top_edges.unwrap_or(false);
         let payload = modules_sweep_payload(&args, include_rows, include_top_edges)
             .map_err(|e| McpError::internal_error(format!("{:#}", e), None))?;
-        Ok(CallToolResult::success(vec![Content::text(
-            payload.to_string(),
-        )]))
+        mcp_ok("pkgrank_modules_sweep", payload, None)
     }
 }
 
@@ -5927,7 +6875,11 @@ impl rmcp::ServerHandler for PkgrankStdioMcpFull {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "Tools for ranking crates/repos in the local Cargo workspace (pkgrank)."
+                "Tools for ranking crates/repos in the local Cargo workspace (pkgrank).\n\n\
+                 Toolsets:\n\
+                 - default: PKGRANK_MCP_TOOLSET=slim (small surface)\n\
+                 - opt-in:  PKGRANK_MCP_TOOLSET=full (includes module/type graph tools)\n\
+                 - opt-in:  PKGRANK_MCP_TOOLSET=debug (internal artifact inspection tools)"
                     .to_string(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
@@ -5955,18 +6907,6 @@ impl PkgrankStdioMcpSlim {
     ) -> Result<CallToolResult, McpError> {
         let root = PkgrankStdioMcpFull::default_root(params.0.root.as_deref());
         let out = PkgrankStdioMcpFull::default_out(params.0.out.as_deref());
-        let refresh_if_missing = params.0.refresh_if_missing.unwrap_or(true);
-        let stale_minutes = params.0.stale_minutes.unwrap_or(60).min(60 * 24 * 30);
-        let limit = params.0.limit.unwrap_or(15).min(100);
-        let axis = params.0.axis.clone();
-        let ppr_top = params.0.ppr_top.unwrap_or(12).min(50);
-        let summarize_readmes = params.0.summarize_readmes.unwrap_or(false);
-        let summarize_repos_top = params.0.summarize_repos_top.unwrap_or(0).min(25);
-        let summarize_crates_top = params.0.summarize_crates_top.unwrap_or(0).min(25);
-        let llm_input_max_chars = params.0.llm_input_max_chars.unwrap_or(12_000).min(80_000);
-        let llm_timeout_secs = params.0.llm_timeout_secs.unwrap_or(30).min(600);
-        let llm_cache = params.0.llm_cache.unwrap_or(true);
-        let llm_include_raw = params.0.llm_include_raw.unwrap_or(false);
         let mode = match params.0.mode.as_deref().unwrap_or("local") {
             "local" => ViewMode::Local,
             "cratesio" => ViewMode::CratesIo,
@@ -5979,262 +6919,30 @@ impl PkgrankStdioMcpSlim {
             }
         };
 
-        let tlc_crates_path = PkgrankStdioMcpFull::artifact_path(&root, &out, "tlc.crates.json");
-        let tlc_repos_path = PkgrankStdioMcpFull::artifact_path(&root, &out, "tlc.repos.json");
-        let inv_path =
-            PkgrankStdioMcpFull::artifact_path(&root, &out, "ecosystem.invariants.violations.json");
-        let ppr_agg_path = PkgrankStdioMcpFull::artifact_path(&root, &out, "ppr.aggregate.json");
+        // Reuse the CLI triage implementation by mapping MCP params into CLI args.
+        let cli = TriageCliArgs {
+            root,
+            out,
+            refresh_if_missing: params.0.refresh_if_missing.unwrap_or(true),
+            mode,
+            stale_minutes: params.0.stale_minutes.unwrap_or(60),
+            limit: params.0.limit.unwrap_or(15),
+            axis: params.0.axis.clone(),
+            ppr_top: params.0.ppr_top.unwrap_or(12),
+            summarize_readmes: params.0.summarize_readmes.unwrap_or(false),
+            summarize_repos_top: params.0.summarize_repos_top.unwrap_or(0),
+            summarize_crates_top: params.0.summarize_crates_top.unwrap_or(0),
+            llm_input_max_chars: params.0.llm_input_max_chars.unwrap_or(12_000),
+            llm_timeout_secs: params.0.llm_timeout_secs.unwrap_or(30),
+            llm_cache: params.0.llm_cache.unwrap_or(true),
+            llm_include_raw: params.0.llm_include_raw.unwrap_or(false),
+            format: OutputFormat::Json,
+        };
 
-        let required = [
-            ("tlc.crates.json", &tlc_crates_path),
-            ("tlc.repos.json", &tlc_repos_path),
-            ("ecosystem.invariants.violations.json", &inv_path),
-            ("ppr.aggregate.json", &ppr_agg_path),
-        ];
-        let mut missing = Vec::new();
-        for (name, p) in required {
-            if !p.exists() {
-                missing.push(name.to_string());
-            }
-        }
-        let missing_before_refresh = missing.clone();
-
-        let mut refreshed = false;
-        if refresh_if_missing && !missing.is_empty() {
-            let args = ViewArgs {
-                root: root.clone(),
-                out: out.clone(),
-                mode,
-                local_top: 10,
-                cratesio_depth: 2,
-                cratesio_dev: false,
-                cratesio_build: false,
-                cratesio_optional: false,
-                quiet: true,
-            };
-            run_view(&args).map_err(|e| McpError::internal_error(format!("{:#}", e), None))?;
-            refreshed = true;
-            missing.clear();
-            for (name, p) in [
-                ("tlc.crates.json", &tlc_crates_path),
-                ("tlc.repos.json", &tlc_repos_path),
-                ("ecosystem.invariants.violations.json", &inv_path),
-                ("ppr.aggregate.json", &ppr_agg_path),
-            ] {
-                if !p.exists() {
-                    missing.push(name.to_string());
-                }
-            }
-        }
-
-        let mut crates: Vec<TlcCrateRow> = PkgrankStdioMcpFull::read_json_file(&tlc_crates_path)?;
-        let mut repos: Vec<TlcRepoRow> = PkgrankStdioMcpFull::read_json_file(&tlc_repos_path)?;
-        let violations: Vec<RepoInvariantViolation> =
-            PkgrankStdioMcpFull::read_json_file(&inv_path)?;
-        let ppr_agg: Vec<(String, f64)> = PkgrankStdioMcpFull::read_json_file(&ppr_agg_path)?;
-
-        if let Some(ax) = axis.as_ref() {
-            crates.retain(|r| &r.axis == ax);
-            repos.retain(|r| &r.axis == ax);
-        }
-
-        let violations_sample = violations.iter().take(10).collect::<Vec<_>>();
-        let violation_rules_top = summarize_violation_rules(&violations, 5);
-        let artifacts = serde_json::json!({
-            "tlc_crates": {
-                "path": tlc_crates_path.display().to_string(),
-                "age_minutes": file_age_minutes(&tlc_crates_path),
-                "stale": file_age_minutes(&tlc_crates_path).map(|m| m >= stale_minutes),
-            },
-            "tlc_repos": {
-                "path": tlc_repos_path.display().to_string(),
-                "age_minutes": file_age_minutes(&tlc_repos_path),
-                "stale": file_age_minutes(&tlc_repos_path).map(|m| m >= stale_minutes),
-            },
-            "invariants": {
-                "path": inv_path.display().to_string(),
-                "age_minutes": file_age_minutes(&inv_path),
-                "stale": file_age_minutes(&inv_path).map(|m| m >= stale_minutes),
-            },
-            "ppr_aggregate": {
-                "path": ppr_agg_path.display().to_string(),
-                "age_minutes": file_age_minutes(&ppr_agg_path),
-                "stale": file_age_minutes(&ppr_agg_path).map(|m| m >= stale_minutes),
-            },
-        });
-        let artifact_ages = [
-            file_age_minutes(&tlc_crates_path),
-            file_age_minutes(&tlc_repos_path),
-            file_age_minutes(&inv_path),
-            file_age_minutes(&ppr_agg_path),
-        ];
-        let max_age = artifact_ages.iter().copied().flatten().max();
-        let stale_any = artifact_ages
-            .iter()
-            .copied()
-            .flatten()
-            .any(|m| m >= stale_minutes);
-
-        // Optional: hydrate AI README summaries for just the top-N rows.
-        let mut readme_ai_repos: Vec<serde_json::Value> = Vec::new();
-        let mut readme_ai_crates: Vec<serde_json::Value> = Vec::new();
-        if summarize_readmes && (summarize_repos_top > 0 || summarize_crates_top > 0) {
-            // Repos: use repo name -> README at repo root.
-            for r in repos.iter().take(summarize_repos_top) {
-                let readme_path = find_readme_for_repo(&root, &r.repo);
-                let ai = maybe_add_readme_llm_summary(
-                    &root,
-                    &out,
-                    "repo",
-                    &r.repo,
-                    readme_path.as_ref(),
-                    true,
-                    llm_input_max_chars,
-                    llm_timeout_secs,
-                    llm_cache,
-                )
-                .await?;
-                let parsed = ai.get("parsed").cloned().unwrap_or(serde_json::Value::Null);
-                let raw = ai.get("raw").cloned().unwrap_or(serde_json::Value::Null);
-                readme_ai_repos.push(serde_json::json!({
-                    "repo": r.repo,
-                    "axis": r.axis,
-                    "tlc_score": r.score,
-                    "available": ai.get("available").cloned().unwrap_or(serde_json::Value::Null),
-                    "cached": ai.get("cached").cloned().unwrap_or(serde_json::Value::Null),
-                    "reason": ai.get("reason").cloned().unwrap_or(serde_json::Value::Null),
-                    "parsed": parsed,
-                    "raw": if llm_include_raw { raw } else { serde_json::Value::Null },
-                }));
-            }
-
-            // Crates: use manifest_path -> crate-local README.
-            for c in crates.iter().take(summarize_crates_top) {
-                let readme_path = find_readme_for_manifest(&root, &c.manifest_path);
-                let ai = maybe_add_readme_llm_summary(
-                    &root,
-                    &out,
-                    "crate",
-                    &c.name,
-                    readme_path.as_ref(),
-                    true,
-                    llm_input_max_chars,
-                    llm_timeout_secs,
-                    llm_cache,
-                )
-                .await?;
-                let parsed = ai.get("parsed").cloned().unwrap_or(serde_json::Value::Null);
-                let raw = ai.get("raw").cloned().unwrap_or(serde_json::Value::Null);
-                readme_ai_crates.push(serde_json::json!({
-                    "crate": c.name,
-                    "repo": c.repo,
-                    "axis": c.axis,
-                    "tlc_score": c.score,
-                    "available": ai.get("available").cloned().unwrap_or(serde_json::Value::Null),
-                    "cached": ai.get("cached").cloned().unwrap_or(serde_json::Value::Null),
-                    "reason": ai.get("reason").cloned().unwrap_or(serde_json::Value::Null),
-                    "parsed": parsed,
-                    "raw": if llm_include_raw { raw } else { serde_json::Value::Null },
-                }));
-            }
-        }
-
-        let payload = serde_json::json!({
-            "ok": true,
-            "root": root.display().to_string(),
-            "out_dir": if out.is_absolute() { out.display().to_string() } else { root.join(&out).display().to_string() },
-            "artifacts": artifacts,
-            "filters": {
-                "axis": axis,
-                "limit": limit,
-                "ppr_top": ppr_top,
-                "stale_minutes": stale_minutes,
-                "refresh_if_missing": refresh_if_missing,
-                "mode": params.0.mode.clone().unwrap_or_else(|| "local".to_string()),
-                "summarize_readmes": summarize_readmes,
-                "summarize_repos_top": summarize_repos_top,
-                "summarize_crates_top": summarize_crates_top,
-                "llm_input_max_chars": llm_input_max_chars,
-                "llm_timeout_secs": llm_timeout_secs,
-                "llm_cache": llm_cache,
-                "llm_include_raw": llm_include_raw,
-            },
-            "summary": {
-                "text": {
-                    "top_repos": format_top_tlc_repos(&repos, 8),
-                    "top_crates": format_top_tlc_crates(&crates, 8),
-                },
-                "staleness": {
-                    "stale_any": stale_any,
-                    "max_age_minutes": max_age,
-                },
-                "violations": violations.len(),
-                "violations_sample": violations_sample,
-                "violation_rules_top": violation_rules_top,
-                "top_ppr": ppr_agg.iter().take(ppr_top).collect::<Vec<_>>(),
-                "refreshed": refreshed,
-                "missing_before_refresh": missing_before_refresh,
-                "missing_after_refresh": missing,
-            },
-            "readme_ai": {
-                "repos": readme_ai_repos,
-                "crates": readme_ai_crates,
-            },
-            "tlc": {
-                "crates": crates.into_iter().take(limit).collect::<Vec<_>>(),
-                "repos": repos.into_iter().take(limit).collect::<Vec<_>>(),
-            }
-        });
-
-        let mut summary = String::new();
-        let _ = writeln!(
-            &mut summary,
-            "pkgrank triage (axis={:?}) stale_any={} max_age_minutes={:?} refreshed={} missing_after_refresh={:?}",
-            params.0.axis,
-            stale_any,
-            max_age,
-            refreshed,
-            payload
-                .get("summary")
-                .and_then(|s| s.get("missing_after_refresh"))
-                .cloned()
-                .unwrap_or(serde_json::Value::Null)
-        );
-        let _ = writeln!(&mut summary, "");
-        let _ = writeln!(&mut summary, "Top repos:");
-        let _ = writeln!(
-            &mut summary,
-            "{}",
-            payload
-                .get("summary")
-                .and_then(|s| s.get("text"))
-                .and_then(|t| t.get("top_repos"))
-                .and_then(|t| t.as_str())
-                .unwrap_or("")
-        );
-        let _ = writeln!(&mut summary, "");
-        let _ = writeln!(&mut summary, "Top crates:");
-        let _ = writeln!(
-            &mut summary,
-            "{}",
-            payload
-                .get("summary")
-                .and_then(|s| s.get("text"))
-                .and_then(|t| t.get("top_crates"))
-                .and_then(|t| t.as_str())
-                .unwrap_or("")
-        );
-        let _ = writeln!(&mut summary, "");
-        let _ = writeln!(
-            &mut summary,
-            "Invariant rule counts (top): {:?}",
-            violation_rules_top
-        );
-
-        Ok(CallToolResult::success(vec![
-            Content::text(summary),
-            Content::text(payload.to_string()),
-        ]))
+        let (payload, summary) = triage_payload_from_cli(&cli)
+            .await
+            .map_err(|e| McpError::internal_error(format!("{:#}", e), None))?;
+        mcp_ok("pkgrank_triage", payload, Some(summary))
     }
 
     #[tool(description = "Generate pkgrank artifacts (pkgrank view)")]
@@ -6273,14 +6981,11 @@ impl PkgrankStdioMcpSlim {
         let html_path =
             PkgrankStdioMcpFull::artifact_path(&args.root, &args.out, "pkgrank_overview.html");
         let payload = serde_json::json!({
-            "ok": true,
             "root": args.root.display().to_string(),
             "out_dir": if args.out.is_absolute() { args.out.display().to_string() } else { args.root.join(&args.out).display().to_string() },
             "html_path": html_path.display().to_string(),
         });
-        Ok(CallToolResult::success(vec![Content::text(
-            payload.to_string(),
-        )]))
+        mcp_ok("pkgrank_view", payload, None)
     }
 
     #[tool(description = "Compute local crate ranking (pkgrank analyze)")]
@@ -6292,34 +6997,6 @@ impl PkgrankStdioMcpSlim {
             tool_router: PkgrankStdioMcpFull::tool_router(),
         }
         .pkgrank_analyze(params)
-        .await
-    }
-
-    #[tool(
-        description = "Compute internal module/item centrality (pkgrank modules; cargo-modules-backed)"
-    )]
-    async fn pkgrank_modules(
-        &self,
-        params: Parameters<PkgrankModulesToolArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        PkgrankStdioMcpFull {
-            tool_router: PkgrankStdioMcpFull::tool_router(),
-        }
-        .pkgrank_modules(params)
-        .await
-    }
-
-    #[tool(
-        description = "Compute internal module/item centrality across multiple packages (pkgrank modules-sweep)"
-    )]
-    async fn pkgrank_modules_sweep(
-        &self,
-        params: Parameters<PkgrankModulesSweepToolArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        PkgrankStdioMcpFull {
-            tool_router: PkgrankStdioMcpFull::tool_router(),
-        }
-        .pkgrank_modules_sweep(params)
         .await
     }
 
@@ -6339,9 +7016,7 @@ impl PkgrankStdioMcpSlim {
             include_readme,
             readme_max_chars,
         )?;
-        Ok(CallToolResult::success(vec![Content::text(
-            payload.to_string(),
-        )]))
+        mcp_ok("pkgrank_repo_detail", payload, None)
     }
 
     #[tool(description = "Get crate details from artifacts")]
@@ -6360,9 +7035,7 @@ impl PkgrankStdioMcpSlim {
             include_readme,
             readme_max_chars,
         )?;
-        Ok(CallToolResult::success(vec![Content::text(
-            payload.to_string(),
-        )]))
+        mcp_ok("pkgrank_crate_detail", payload, None)
     }
 
     #[tool(description = "Snapshot pkgrank artifacts (copy selected files)")]
@@ -6396,7 +7069,11 @@ impl rmcp::ServerHandler for PkgrankStdioMcpSlim {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "Tools for ranking crates/repos in the local Cargo workspace (pkgrank)."
+                "Tools for ranking crates/repos in the local Cargo workspace (pkgrank).\n\n\
+                 Toolsets:\n\
+                 - default: PKGRANK_MCP_TOOLSET=slim (small surface)\n\
+                 - opt-in:  PKGRANK_MCP_TOOLSET=full (includes module/type graph tools)\n\
+                 - opt-in:  PKGRANK_MCP_TOOLSET=debug (internal artifact inspection tools)"
                     .to_string(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
@@ -6748,6 +7425,7 @@ fn crate_detail_payload(
 }
 
 #[cfg(feature = "stdio")]
+#[allow(clippy::too_many_arguments)]
 async fn maybe_add_readme_llm_summary(
     root: &Path,
     out: &Path,

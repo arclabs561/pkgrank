@@ -506,6 +506,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "graphops"
+version = "0.1.0"
+dependencies = [
+ "ordered-float",
+ "petgraph",
+ "rand",
+ "rand_chacha",
+ "rand_distr",
+ "thiserror",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -861,6 +873,7 @@ dependencies = [
  "assert_cmd",
  "cargo_metadata",
  "clap",
+ "graphops",
  "petgraph",
  "predicates",
  "rmcp",
@@ -869,7 +882,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "ureq",
- "walk",
 ]
 
 [[package]]
@@ -1530,19 +1542,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09ac3b126d3914f9849036f826e054cbabdc8519970b8998ddaf3b5bd3c65f11"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "walk"
-version = "0.1.0"
-source = "git+https://github.com/arclabs561/walk?rev=63aba8acbaab64b21b2df2059db486d01d8c5a4e#63aba8acbaab64b21b2df2059db486d01d8c5a4e"
-dependencies = [
- "ordered-float",
- "petgraph",
- "rand",
- "rand_chacha",
- "rand_distr",
- "thiserror",
 ]
 
 [[package]]
