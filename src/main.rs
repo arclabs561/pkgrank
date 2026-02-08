@@ -23,6 +23,8 @@ use std::process::Command as ProcessCommand;
 use std::time::Instant;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod graphops;
+
 use graphops::{
     betweenness_centrality, pagerank, pagerank_checked, pagerank_checked_run, pagerank_run,
     pagerank_weighted, pagerank_weighted_checked, pagerank_weighted_checked_run,

@@ -1,18 +1,28 @@
-## pkgrank
+# pkgrank
 
 `pkgrank` ranks nodes in a Cargo dependency graph using centrality metrics.
 
-Graph model:
+## TL;DR
+
+```bash
+# Rank local crates by importance (PageRank)
+cargo run -p pkgrank -- -n 10
+
+# Rank by "who consumes this?" (Consumer PageRank)
+cargo run -p pkgrank -- --metric consumers-pagerank -n 10
+```
+
+## Graph model
 
 - Nodes are Cargo packages (from `cargo metadata`).
 - Directed edges are $A \to B$ iff **crate A depends on crate B**.
 
-Interpretation:
+## Interpretation
 
 - PageRank on the depends-on graph tends to surface **shared dependencies / “substrate” crates**.
 - To surface **top-level orchestrators / consumers**, use the “consumer PageRank” (PageRank on the reversed graph).
 
-### Usage (local crate graph)
+## Usage (local crate graph)
 
 Analyze the current directory (finds `Cargo.toml` if present):
 
@@ -44,7 +54,7 @@ Triage (artifact-backed summary, same payload as MCP `pkgrank_triage`):
 cargo run -p pkgrank -- triage --root . --out evals/pkgrank
 ```
 
-### JSON output shape (stable wrapper)
+## JSON output shape (stable wrapper)
 
 For commands that support `--format json`, the JSON is wrapped for forwards-compatible parsing:
 
@@ -64,7 +74,7 @@ For commands that support `--format json`, the JSON is wrapped for forwards-comp
 - `truncated`: whether `rows` was truncated
 - `json_limit`: the applied limit (if any)
 
-### Usage (module/item graph via cargo-modules)
+## Usage (module/item graph via cargo-modules)
 
 `pkgrank modules` shells out to [`cargo-modules`](https://github.com/regexident/cargo-modules) and parses its DOT output.
 
@@ -118,7 +128,7 @@ Caching:
 - `modules`/`modules-sweep` cache `cargo modules dependencies` DOT output under `evals/pkgrank/modules_cache/`.
 - Use `--cache-refresh` to force regeneration.
 
-### MCP stdio server (Cursor)
+## MCP stdio server (Cursor)
 
 `pkgrank mcp-stdio` runs an MCP server over stdio. Stdout is reserved for JSON-RPC frames.
 
@@ -146,19 +156,19 @@ Tools (high level):
 - Advanced (opt-in: `PKGRANK_MCP_TOOLSET=full`): `pkgrank_status`, `pkgrank_modules`, `pkgrank_modules_sweep`
 - Debug (opt-in: `PKGRANK_MCP_TOOLSET=debug`): internal artifact-inspection tools (e.g. TLC tables, invariants list, PPR summaries)
 
-### Tests (E2E targets)
+## Tests (E2E targets)
 
 - Default test suite is **offline/deterministic** and uses **local real targets** (the dev super-workspace itself).
 - URL-backed tests (crates.io crawl) are **opt-in**:
   - set `PKGRANK_E2E_NETWORK=1` before running tests.
 
-### Invariants (must not drift)
+## Invariants (must not drift)
 
 - Edge meaning: $A \to B$ means “A depends on B”.
 - Dependency kind gating: `--dev` / `--build` control whether those edges exist.
 - Workspace restriction: “workspace-only” means nodes/edges restricted to the current Cargo workspace members.
 
-### User stories (what this is for)
+## User stories (what this is for)
 
 These are the “real” workflows this tool is meant to serve.
 
@@ -179,7 +189,7 @@ Evidence pointers (qualitative):
 - Cursor’s framing of MCP: “connect to external tools and data sources” (so MCP tends to be used for “triage + drilldown”): `https://cursor.com/docs/context/mcp`
 - Cargo’s own `cargo tree` docs emphasize dependency display, reverse-deps (`--invert`), and “duplicates” as a common pain point: `https://doc.rust-lang.org/cargo/commands/cargo-tree.html`
 
-### Dependencies / integration notes
+## Dependencies / integration notes
 
-- `pkgrank` computes centralities via the local `graphops/` crate (a path dependency in this workspace).
-
+- `pkgrank` includes its centrality algorithms internally (PageRank / PPR / betweenness / reachability),
+  to stay buildable as a standalone repo (no cross-repo path deps).

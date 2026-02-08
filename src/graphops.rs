@@ -1,0 +1,499 @@
+//! Local centrality algorithms.
+//!
+//! `pkgrank` started life depending on a sibling crate (`graphops/`) for graph algorithms.
+//! Since this repo is meant to be a standalone, public tool, we keep a small subset here to
+//! avoid cross-repo path dependencies.
+//!
+//! Scope:
+//! - PageRank (unweighted + weighted) with an optional “checked” validation pass.
+//! - Personalized PageRank (PPR) for simple entrypoint heuristics.
+//! - Reachability counts (transitive closure sizes) for “blast radius” style metrics.
+//! - Betweenness centrality (Brandes; directed, unweighted).
+
+use petgraph::prelude::*;
+use std::fmt;
+
+#[derive(Debug, Clone)]
+pub struct Error(String);
+
+impl Error {
+    fn invalid_parameter(msg: impl Into<String>) -> Self {
+        Self(msg.into())
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for Error {}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, Clone)]
+pub struct PageRankRun {
+    pub scores: Vec<f64>,
+    pub iterations: usize,
+    pub diff_l1: f64,
+    pub converged: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PageRankConfig {
+    pub damping: f64,
+    pub max_iterations: usize,
+    pub tolerance: f64,
+}
+
+impl Default for PageRankConfig {
+    fn default() -> Self {
+        Self {
+            damping: 0.85,
+            max_iterations: 100,
+            tolerance: 1e-6,
+        }
+    }
+}
+
+impl PageRankConfig {
+    pub fn validate(&self) -> Result<()> {
+        if !self.damping.is_finite() {
+            return Err(Error::invalid_parameter("damping must be finite"));
+        }
+        if !(0.0..=1.0).contains(&self.damping) {
+            return Err(Error::invalid_parameter("damping must be in [0,1]"));
+        }
+        if self.max_iterations == 0 {
+            return Err(Error::invalid_parameter("max_iterations must be > 0"));
+        }
+        if !self.tolerance.is_finite() || self.tolerance <= 0.0 {
+            return Err(Error::invalid_parameter(
+                "tolerance must be finite and > 0",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Checked PageRank (unweighted).
+pub fn pagerank_checked<N>(graph: &DiGraph<N, f64>, config: PageRankConfig) -> Result<Vec<f64>> {
+    config.validate()?;
+    Ok(pagerank(graph, config))
+}
+
+pub fn pagerank<N>(graph: &DiGraph<N, f64>, config: PageRankConfig) -> Vec<f64> {
+    pagerank_run(graph, config).scores
+}
+
+/// PageRank with convergence reporting (unweighted: split mass evenly over outgoing edges).
+pub fn pagerank_run<N>(graph: &DiGraph<N, f64>, config: PageRankConfig) -> PageRankRun {
+    let n = graph.node_count();
+    if n == 0 {
+        return PageRankRun {
+            scores: Vec::new(),
+            iterations: 0,
+            diff_l1: 0.0,
+            converged: true,
+        };
+    }
+
+    let n_f64 = n as f64;
+    let mut scores = vec![1.0 / n_f64; n];
+    let mut new_scores = vec![0.0; n];
+
+    let out_degrees: Vec<usize> = (0..n)
+        .map(|i| {
+            graph
+                .neighbors_directed(NodeIndex::new(i), Direction::Outgoing)
+                .count()
+        })
+        .collect();
+
+    let mut iters = 0usize;
+    let mut last_diff = f64::INFINITY;
+    let mut converged = false;
+    for _ in 0..config.max_iterations {
+        iters += 1;
+
+        let dangling_sum: f64 = out_degrees
+            .iter()
+            .enumerate()
+            .filter(|(_, &deg)| deg == 0)
+            .map(|(i, _)| scores[i])
+            .sum();
+        let dangling_contrib = config.damping * dangling_sum / n_f64;
+        let teleport = (1.0 - config.damping) / n_f64;
+        new_scores.fill(teleport + dangling_contrib);
+
+        for u in 0..n {
+            let deg = out_degrees[u];
+            if deg == 0 {
+                continue;
+            }
+            let share = config.damping * scores[u] / deg as f64;
+            for v in graph.neighbors_directed(NodeIndex::new(u), Direction::Outgoing) {
+                new_scores[v.index()] += share;
+            }
+        }
+
+        let diff: f64 = scores
+            .iter()
+            .zip(new_scores.iter())
+            .map(|(old, new)| (old - new).abs())
+            .sum();
+        last_diff = diff;
+        std::mem::swap(&mut scores, &mut new_scores);
+        if diff < config.tolerance {
+            converged = true;
+            break;
+        }
+    }
+
+    PageRankRun {
+        scores,
+        iterations: iters,
+        diff_l1: last_diff,
+        converged,
+    }
+}
+
+pub fn pagerank_checked_run<N>(
+    graph: &DiGraph<N, f64>,
+    config: PageRankConfig,
+) -> Result<PageRankRun> {
+    config.validate()?;
+    Ok(pagerank_run(graph, config))
+}
+
+/// Weighted PageRank (outgoing mass split proportional to non-negative edge weights).
+pub fn pagerank_weighted<N>(graph: &DiGraph<N, f64>, config: PageRankConfig) -> Vec<f64> {
+    pagerank_weighted_run(graph, config).scores
+}
+
+pub fn pagerank_weighted_run<N>(graph: &DiGraph<N, f64>, config: PageRankConfig) -> PageRankRun {
+    let n = graph.node_count();
+    if n == 0 {
+        return PageRankRun {
+            scores: Vec::new(),
+            iterations: 0,
+            diff_l1: 0.0,
+            converged: true,
+        };
+    }
+
+    let n_f64 = n as f64;
+    let mut scores = vec![1.0 / n_f64; n];
+    let mut new_scores = vec![0.0; n];
+
+    // Precompute outgoing edges for each node once.
+    let outgoing: Vec<Vec<(usize, f64)>> = (0..n)
+        .map(|u| {
+            graph
+                .edges_directed(NodeIndex::new(u), Direction::Outgoing)
+                .map(|e| (e.target().index(), (*e.weight()).max(0.0)))
+                .collect()
+        })
+        .collect();
+    let out_wsum: Vec<f64> = outgoing
+        .iter()
+        .map(|edges| edges.iter().map(|&(_v, w)| w).sum())
+        .collect();
+
+    let mut iters = 0usize;
+    let mut last_diff = f64::INFINITY;
+    let mut converged = false;
+    for _ in 0..config.max_iterations {
+        iters += 1;
+
+        let dangling_sum: f64 = out_wsum
+            .iter()
+            .enumerate()
+            .filter(|(_, &ws)| ws == 0.0)
+            .map(|(i, _)| scores[i])
+            .sum();
+
+        let dangling_contrib = config.damping * dangling_sum / n_f64;
+        let teleport = (1.0 - config.damping) / n_f64;
+        new_scores.fill(teleport + dangling_contrib);
+
+        for u in 0..n {
+            let ws = out_wsum[u];
+            if ws <= 0.0 {
+                continue;
+            }
+            for &(v, w) in &outgoing[u] {
+                if w > 0.0 {
+                    new_scores[v] += config.damping * scores[u] * (w / ws);
+                }
+            }
+        }
+
+        let diff: f64 = scores
+            .iter()
+            .zip(new_scores.iter())
+            .map(|(old, new)| (old - new).abs())
+            .sum();
+        last_diff = diff;
+        std::mem::swap(&mut scores, &mut new_scores);
+        if diff < config.tolerance {
+            converged = true;
+            break;
+        }
+    }
+
+    PageRankRun {
+        scores,
+        iterations: iters,
+        diff_l1: last_diff,
+        converged,
+    }
+}
+
+pub fn pagerank_weighted_checked<N>(
+    graph: &DiGraph<N, f64>,
+    config: PageRankConfig,
+) -> Result<Vec<f64>> {
+    pagerank_weighted_checked_run(graph, config).map(|r| r.scores)
+}
+
+pub fn pagerank_weighted_checked_run<N>(
+    graph: &DiGraph<N, f64>,
+    config: PageRankConfig,
+) -> Result<PageRankRun> {
+    config.validate()?;
+    for e in graph.edge_references() {
+        let w = *e.weight();
+        if !w.is_finite() {
+            return Err(Error::invalid_parameter("edge weights must be finite"));
+        }
+        if w < 0.0 {
+            return Err(Error::invalid_parameter("edge weights must be non-negative"));
+        }
+    }
+    Ok(pagerank_weighted_run(graph, config))
+}
+
+/// Personalized PageRank (PPR).
+pub fn personalized_pagerank<N>(
+    graph: &DiGraph<N, f64>,
+    config: PageRankConfig,
+    personalization: &[f64],
+) -> Vec<f64> {
+    personalized_pagerank_run(graph, config, personalization).scores
+}
+
+fn personalized_pagerank_run<N>(
+    graph: &DiGraph<N, f64>,
+    config: PageRankConfig,
+    personalization: &[f64],
+) -> PageRankRun {
+    let n = graph.node_count();
+    if n == 0 {
+        return PageRankRun {
+            scores: Vec::new(),
+            iterations: 0,
+            diff_l1: 0.0,
+            converged: true,
+        };
+    }
+
+    let p_sum: f64 = personalization.iter().sum();
+    let p_vec: Vec<f64> = if p_sum > 0.0 {
+        personalization.iter().map(|&x| x / p_sum).collect()
+    } else {
+        vec![1.0 / n as f64; n]
+    };
+
+    let mut scores = p_vec.clone();
+    let mut new_scores = vec![0.0; n];
+    let out_degrees: Vec<usize> = (0..n)
+        .map(|i| {
+            graph
+                .neighbors_directed(NodeIndex::new(i), Direction::Outgoing)
+                .count()
+        })
+        .collect();
+
+    let mut iters = 0usize;
+    let mut last_diff = f64::INFINITY;
+    let mut converged = false;
+    for _ in 0..config.max_iterations {
+        iters += 1;
+
+        let dangling_sum: f64 = out_degrees
+            .iter()
+            .enumerate()
+            .filter(|(_, &deg)| deg == 0)
+            .map(|(i, _)| scores[i])
+            .sum();
+
+        for i in 0..n {
+            new_scores[i] =
+                (1.0 - config.damping) * p_vec[i] + config.damping * dangling_sum * p_vec[i];
+        }
+
+        for u in 0..n {
+            let deg = out_degrees[u];
+            if deg == 0 {
+                continue;
+            }
+            let share = config.damping * scores[u] / deg as f64;
+            for v in graph.neighbors_directed(NodeIndex::new(u), Direction::Outgoing) {
+                new_scores[v.index()] += share;
+            }
+        }
+
+        let diff: f64 = scores
+            .iter()
+            .zip(new_scores.iter())
+            .map(|(old, new)| (old - new).abs())
+            .sum();
+        last_diff = diff;
+        std::mem::swap(&mut scores, &mut new_scores);
+        if diff < config.tolerance {
+            converged = true;
+            break;
+        }
+    }
+
+    PageRankRun {
+        scores,
+        iterations: iters,
+        diff_l1: last_diff,
+        converged,
+    }
+}
+
+/// Count transitive reachability for each node in a directed graph.
+///
+/// Returns `(dependents, dependencies)` where:
+/// - `dependencies[u]` is the number of distinct nodes reachable from `u` following `u -> v`
+/// - `dependents[u]` is the number of distinct nodes that can reach `u` (reachability in the
+///   reversed graph)
+pub fn reachability_counts_edges(n: usize, edges: &[(usize, usize)]) -> (Vec<usize>, Vec<usize>) {
+    let mut fwd: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut rev: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for &(u, v) in edges {
+        if u >= n || v >= n {
+            continue;
+        }
+        fwd[u].push(v);
+        rev[v].push(u);
+    }
+
+    let mut dependencies = vec![0usize; n];
+    let mut dependents = vec![0usize; n];
+
+    // One visited buffer reused for all BFS runs.
+    let mut visited: Vec<u32> = vec![0u32; n];
+    let mut stamp: u32 = 0;
+    let mut q: Vec<usize> = Vec::new();
+
+    for start in 0..n {
+        // Forward reachability (dependencies)
+        stamp = stamp.wrapping_add(1);
+        q.clear();
+        visited[start] = stamp;
+        q.push(start);
+        let mut head = 0usize;
+        let mut count = 0usize;
+        while head < q.len() {
+            let cur = q[head];
+            head += 1;
+            for &nx in &fwd[cur] {
+                if visited[nx] != stamp {
+                    visited[nx] = stamp;
+                    q.push(nx);
+                    count += 1;
+                }
+            }
+        }
+        dependencies[start] = count;
+
+        // Reverse reachability (dependents)
+        stamp = stamp.wrapping_add(1);
+        q.clear();
+        visited[start] = stamp;
+        q.push(start);
+        let mut head = 0usize;
+        let mut count = 0usize;
+        while head < q.len() {
+            let cur = q[head];
+            head += 1;
+            for &nx in &rev[cur] {
+                if visited[nx] != stamp {
+                    visited[nx] = stamp;
+                    q.push(nx);
+                    count += 1;
+                }
+            }
+        }
+        dependents[start] = count;
+    }
+
+    (dependents, dependencies)
+}
+
+/// Betweenness centrality (Brandes) for directed, unweighted graphs.
+///
+/// Returns one score per `NodeIndex`, ordered by index.
+pub fn betweenness_centrality<N, E, Ix>(graph: &petgraph::Graph<N, E, Directed, Ix>) -> Vec<f64>
+where
+    Ix: petgraph::graph::IndexType,
+{
+    let n = graph.node_count();
+    if n <= 2 {
+        return vec![0.0; n];
+    }
+
+    let mut betweenness = vec![0.0; n];
+
+    for s in graph.node_indices() {
+        let mut stack: Vec<NodeIndex<Ix>> = Vec::new();
+        let mut pred: Vec<Vec<NodeIndex<Ix>>> = vec![vec![]; n];
+        let mut sigma = vec![0.0f64; n];
+        let mut dist: Vec<i32> = vec![-1; n];
+
+        sigma[s.index()] = 1.0;
+        dist[s.index()] = 0;
+
+        let mut queue: std::collections::VecDeque<NodeIndex<Ix>> = std::collections::VecDeque::new();
+        queue.push_back(s);
+
+        while let Some(v) = queue.pop_front() {
+            stack.push(v);
+            for w in graph.neighbors_directed(v, Direction::Outgoing) {
+                if dist[w.index()] < 0 {
+                    dist[w.index()] = dist[v.index()] + 1;
+                    queue.push_back(w);
+                }
+                if dist[w.index()] == dist[v.index()] + 1 {
+                    sigma[w.index()] += sigma[v.index()];
+                    pred[w.index()].push(v);
+                }
+            }
+        }
+
+        let mut delta = vec![0.0f64; n];
+        while let Some(w) = stack.pop() {
+            for &v in &pred[w.index()] {
+                let sigma_w = sigma[w.index()];
+                if sigma_w > 0.0 {
+                    delta[v.index()] += (sigma[v.index()] / sigma_w) * (1.0 + delta[w.index()]);
+                }
+            }
+            if w != s {
+                betweenness[w.index()] += delta[w.index()];
+            }
+        }
+    }
+
+    let norm = 1.0 / ((n - 1) * (n - 2)) as f64;
+    for b in &mut betweenness {
+        *b *= norm;
+    }
+    betweenness
+}
+
