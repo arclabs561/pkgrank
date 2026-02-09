@@ -2,14 +2,25 @@
 
 `pkgrank` ranks nodes in a Cargo dependency graph using centrality metrics.
 
+## Install
+
+This repo is currently `publish = false` (not on crates.io). Install from source:
+
+```bash
+git clone https://github.com/arclabs561/pkgrank
+cd pkgrank
+cargo install --path .
+pkgrank --help
+```
+
 ## TL;DR
 
 ```bash
 # Rank local crates by importance (PageRank)
-cargo run -p pkgrank -- -n 10
+cargo run -- -n 10
 
 # Rank by "who consumes this?" (Consumer PageRank)
-cargo run -p pkgrank -- --metric consumers-pagerank -n 10
+cargo run -- --metric consumers-pagerank -n 10
 ```
 
 ## Graph model
@@ -27,31 +38,31 @@ cargo run -p pkgrank -- --metric consumers-pagerank -n 10
 Analyze the current directory (finds `Cargo.toml` if present):
 
 ```bash
-cargo run -p pkgrank -- -n 25
+cargo run -- -n 25
 ```
 
 Pick the “top-level orchestrators” view:
 
 ```bash
-cargo run -p pkgrank -- --metric consumers-pagerank -n 25
+cargo run -- --metric consumers-pagerank -n 25
 ```
 
 Bound JSON output explicitly:
 
 ```bash
-cargo run -p pkgrank -- analyze --format json --json-limit 200
+cargo run -- analyze --format json --json-limit 200
 ```
 
 Write per-repo artifacts under `evals/pkgrank/` (super-workspace mode):
 
 ```bash
-cargo run -p pkgrank -- sweep-local --root . --out evals/pkgrank --mode workspace-slice -n 10
+cargo run -- sweep-local --root . --out evals/pkgrank --mode workspace-slice -n 10
 ```
 
 Triage (artifact-backed summary, same payload as MCP `pkgrank_triage`):
 
 ```bash
-cargo run -p pkgrank -- triage --root . --out evals/pkgrank
+cargo run -- triage --root . --out evals/pkgrank
 ```
 
 ## JSON output shape (stable wrapper)
@@ -101,20 +112,20 @@ Note on **CLI vs MCP defaults**:
 File-level hotspots (explicit, but these are now close to the defaults):
 
 ```bash
-cargo run -p pkgrank -- modules --manifest-path ../Cargo.toml -p walk --lib -n 25
+cargo run -- modules --manifest-path ../Cargo.toml -p walk --lib -n 25
 ```
 
 Workspace sweep (summary-only):
 
 ```bash
-cargo run -p pkgrank -- modules-sweep --manifest-path ../Cargo.toml -p walk -p innr --lib
+cargo run -- modules-sweep --manifest-path ../Cargo.toml -p walk -p innr --lib
 ```
 
 Use presets when you want a different “view” quickly:
 
 ```bash
 # Item-level view, more verbose
-cargo run -p pkgrank -- modules --manifest-path ../Cargo.toml -p walk --lib --preset node-full -n 25
+cargo run -- modules --manifest-path ../Cargo.toml -p walk --lib --preset node-full -n 25
 ```
 
 Failure semantics:
@@ -135,7 +146,7 @@ Caching:
 Run:
 
 ```bash
-cargo run -p pkgrank -- mcp-stdio
+cargo run -- mcp-stdio
 ```
 
 Toolset selection (optional):
