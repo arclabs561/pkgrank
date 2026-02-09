@@ -1344,9 +1344,7 @@ fn run_modules_sweep(args: &ModulesSweepArgs) -> Result<()> {
                             .rows
                             .iter()
                             .max_by(|a, b| {
-                                a.pagerank
-                                    .partial_cmp(&b.pagerank)
-                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                a.pagerank.total_cmp(&b.pagerank)
                             })
                             .map(|x| format!("{}({:.3})", x.node, x.pagerank))
                             .unwrap_or_else(|| "-".to_string());
@@ -1354,9 +1352,7 @@ fn run_modules_sweep(args: &ModulesSweepArgs) -> Result<()> {
                             .rows
                             .iter()
                             .max_by(|a, b| {
-                                a.consumers_pagerank
-                                    .partial_cmp(&b.consumers_pagerank)
-                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                a.consumers_pagerank.total_cmp(&b.consumers_pagerank)
                             })
                             .map(|x| format!("{}({:.3})", x.node, x.consumers_pagerank))
                             .unwrap_or_else(|| "-".to_string());
@@ -1364,9 +1360,7 @@ fn run_modules_sweep(args: &ModulesSweepArgs) -> Result<()> {
                             .rows
                             .iter()
                             .max_by(|a, b| {
-                                a.betweenness
-                                    .partial_cmp(&b.betweenness)
-                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                a.betweenness.total_cmp(&b.betweenness)
                             })
                             .map(|x| format!("{}({:.3})", x.node, x.betweenness))
                             .unwrap_or_else(|| "-".to_string());
@@ -1708,9 +1702,7 @@ fn run_modules_core(
                                 node_index_by_name.get(m).map(|&i| (m.as_str(), node_pr[i]))
                             })
                             .collect();
-                        scored.sort_by(|a, b| {
-                            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                        });
+                        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
                         let mut tops = String::new();
                         for (i, (m, s)) in scored.into_iter().take(args.members_top).enumerate() {
                             if i > 0 {
@@ -1745,9 +1737,7 @@ fn run_modules_core(
 
     // Default ordering: dependency PageRank.
     rows.sort_by(|a, b| {
-        b.pagerank
-            .partial_cmp(&a.pagerank)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        b.pagerank.total_cmp(&a.pagerank)
     });
 
     let mut top_edges: Vec<(String, String, f64)> = Vec::new();
@@ -1758,7 +1748,7 @@ fn run_modules_core(
             let w = (*e.weight()).max(0.0);
             top_edges.push((u, v, w));
         }
-        top_edges.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        top_edges.sort_by(|a, b| b.2.total_cmp(&a.2));
         top_edges.truncate(args.edges_top);
     }
 
@@ -1970,14 +1960,13 @@ fn print_modules_text(
 ) {
     let mut sorted: Vec<&ModuleRow> = rows.iter().collect();
     sorted.sort_by(|a, b| match args.metric {
-        Metric::Pagerank => b.pagerank.partial_cmp(&a.pagerank).unwrap(),
+        Metric::Pagerank => b.pagerank.total_cmp(&a.pagerank),
         Metric::ConsumersPagerank => b
             .consumers_pagerank
-            .partial_cmp(&a.consumers_pagerank)
-            .unwrap(),
+            .total_cmp(&a.consumers_pagerank),
         Metric::Indegree => b.in_degree.cmp(&a.in_degree),
         Metric::Outdegree => b.out_degree.cmp(&a.out_degree),
-        Metric::Betweenness => b.betweenness.partial_cmp(&a.betweenness).unwrap(),
+        Metric::Betweenness => b.betweenness.total_cmp(&a.betweenness),
     });
 
     let target = if args.lib {
@@ -2400,7 +2389,7 @@ fn run_analyze(args: &AnalyzeArgs) -> Result<()> {
     let dt_graph = t_graph.elapsed();
 
     let t_score = Instant::now();
-    let (mut rows, convergence) = compute_rows_with_convergence(&metadata, &graph);
+    let (mut rows, convergence) = compute_rows_with_convergence(&metadata, &graph)?;
     sort_rows_by_metric(&mut rows, args.metric);
     let dt_score = t_score.elapsed();
 
@@ -2767,7 +2756,7 @@ fn compute_rows(
     metadata: &Metadata,
     graph: &DiGraph<PackageId, f64>,
     _node_map: &HashMap<PackageId, NodeIndex>,
-) -> Vec<Row> {
+) -> Result<Vec<Row>> {
     let pkg_by_id: HashMap<&PackageId, &cargo_metadata::Package> =
         metadata.packages.iter().map(|p| (&p.id, p)).collect();
 
@@ -2780,10 +2769,9 @@ fn compute_rows(
     let mut rows = Vec::with_capacity(graph.node_count());
     for node in graph.node_indices() {
         let id = graph.node_weight(node).expect("node weight").clone();
-        let pkg = pkg_by_id
+        let pkg = *pkg_by_id
             .get(&id)
-            .copied()
-            .unwrap_or_else(|| panic!("missing package for id {}", id));
+            .ok_or_else(|| anyhow!("missing package for id {}", id))?;
 
         let in_degree = graph.neighbors_directed(node, Direction::Incoming).count();
         let out_degree = graph.neighbors_directed(node, Direction::Outgoing).count();
@@ -2826,17 +2814,15 @@ fn compute_rows(
     }
 
     rows.sort_by(|a, b| {
-        b.pagerank
-            .partial_cmp(&a.pagerank)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        b.pagerank.total_cmp(&a.pagerank)
     });
-    rows
+    Ok(rows)
 }
 
 fn compute_rows_with_convergence(
     metadata: &Metadata,
     graph: &DiGraph<PackageId, f64>,
-) -> (Vec<Row>, serde_json::Value) {
+) -> Result<(Vec<Row>, serde_json::Value)> {
     let pkg_by_id: HashMap<&PackageId, &cargo_metadata::Package> =
         metadata.packages.iter().map(|p| (&p.id, p)).collect();
 
@@ -2852,10 +2838,9 @@ fn compute_rows_with_convergence(
     let mut rows = Vec::with_capacity(graph.node_count());
     for node in graph.node_indices() {
         let id = graph.node_weight(node).expect("node weight").clone();
-        let pkg = pkg_by_id
+        let pkg = *pkg_by_id
             .get(&id)
-            .copied()
-            .unwrap_or_else(|| panic!("missing package for id {}", id));
+            .ok_or_else(|| anyhow!("missing package for id {}", id))?;
 
         let in_degree = graph.neighbors_directed(node, Direction::Incoming).count();
         let out_degree = graph.neighbors_directed(node, Direction::Outgoing).count();
@@ -2896,9 +2881,7 @@ fn compute_rows_with_convergence(
     // Note: sorting for presentation is a policy choice.
     // We sort by the requested metric elsewhere (CLI/MCP), but keep a deterministic default here.
     rows.sort_by(|a, b| {
-        b.pagerank
-            .partial_cmp(&a.pagerank)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        b.pagerank.total_cmp(&a.pagerank)
     });
 
     let convergence = serde_json::json!({
@@ -2906,19 +2889,18 @@ fn compute_rows_with_convergence(
         "consumers_pagerank": convergence_report(&consumers_run),
     });
 
-    (rows, convergence)
+    Ok((rows, convergence))
 }
 
 fn sort_rows_by_metric(rows: &mut [Row], metric: Metric) {
     rows.sort_by(|a, b| {
         let ord = match metric {
-            Metric::Pagerank => b.pagerank.partial_cmp(&a.pagerank),
-            Metric::ConsumersPagerank => b.consumers_pagerank.partial_cmp(&a.consumers_pagerank),
-            Metric::Indegree => Some(b.in_degree.cmp(&a.in_degree)),
-            Metric::Outdegree => Some(b.out_degree.cmp(&a.out_degree)),
-            Metric::Betweenness => b.betweenness.partial_cmp(&a.betweenness),
-        }
-        .unwrap_or(std::cmp::Ordering::Equal);
+            Metric::Pagerank => b.pagerank.total_cmp(&a.pagerank),
+            Metric::ConsumersPagerank => b.consumers_pagerank.total_cmp(&a.consumers_pagerank),
+            Metric::Indegree => b.in_degree.cmp(&a.in_degree),
+            Metric::Outdegree => b.out_degree.cmp(&a.out_degree),
+            Metric::Betweenness => b.betweenness.total_cmp(&a.betweenness),
+        };
 
         if ord != std::cmp::Ordering::Equal {
             return ord;
@@ -2931,14 +2913,13 @@ fn sort_rows_by_metric(rows: &mut [Row], metric: Metric) {
 fn print_text(rows: &[Row], metric: Metric, top: usize, nodes: usize, edges: usize) {
     let mut sorted: Vec<&Row> = rows.iter().collect();
     sorted.sort_by(|a, b| match metric {
-        Metric::Pagerank => b.pagerank.partial_cmp(&a.pagerank).unwrap(),
+        Metric::Pagerank => b.pagerank.total_cmp(&a.pagerank),
         Metric::ConsumersPagerank => b
             .consumers_pagerank
-            .partial_cmp(&a.consumers_pagerank)
-            .unwrap(),
+            .total_cmp(&a.consumers_pagerank),
         Metric::Indegree => b.in_degree.cmp(&a.in_degree),
         Metric::Outdegree => b.out_degree.cmp(&a.out_degree),
-        Metric::Betweenness => b.betweenness.partial_cmp(&a.betweenness).unwrap(),
+        Metric::Betweenness => b.betweenness.total_cmp(&a.betweenness),
     });
 
     println!("Top {} by {:?}:", top, metric);
@@ -3332,7 +3313,7 @@ fn compute_tlc_crates(root: &Path, out_dir: &Path) -> Result<Vec<TlcCrateRow>> {
     let manifest = manifest_path(&analyze.path)?;
     let metadata = metadata_for(&manifest, &analyze)?;
     let (graph, node_map) = build_graph(&metadata, &analyze)?;
-    let rows = compute_rows(&metadata, &graph, &node_map);
+    let rows = compute_rows(&metadata, &graph, &node_map)?;
 
     // Repo axis mapping (optional), pulled from dev_repos_overview.json.
     // We use this only for labeling in the TLC output; it must not affect the graph itself.
@@ -3513,7 +3494,7 @@ fn compute_tlc_crates(root: &Path, out_dir: &Path) -> Result<Vec<TlcCrateRow>> {
 
         let reachable_first_party = scores.iter().filter(|&&s| s > 1e-12).count();
         let mut items: Vec<(usize, f64)> = scores.into_iter().enumerate().collect();
-        items.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        items.sort_by(|a, b| b.1.total_cmp(&a.1));
         let mut top = Vec::new();
         for (i, s) in items {
             if i == seed_fp {
@@ -3561,7 +3542,7 @@ fn compute_tlc_crates(root: &Path, out_dir: &Path) -> Result<Vec<TlcCrateRow>> {
             ppr_agg.push((r.name.clone(), mass));
         }
     }
-    ppr_agg.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ppr_agg.sort_by(|a, b| b.1.total_cmp(&a.1));
     fs::write(
         out_dir.join("ppr.aggregate.json"),
         serde_json::to_string_pretty(&ppr_agg)?,
@@ -3631,9 +3612,7 @@ fn compute_tlc_crates(root: &Path, out_dir: &Path) -> Result<Vec<TlcCrateRow>> {
     }
 
     tlc.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        b.score.total_cmp(&a.score)
     });
     fs::write(
         out_dir.join("tlc.crates.json"),
@@ -3877,9 +3856,7 @@ fn compute_repo_graph_from_live_metadata(
         });
     }
     rows.sort_by(|a, b| {
-        b.pagerank
-            .partial_cmp(&a.pagerank)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        b.pagerank.total_cmp(&a.pagerank)
     });
 
     // Axis totals for depends_pr.
@@ -3987,9 +3964,7 @@ fn compute_repo_graph_from_live_metadata(
         });
     }
     tlc_repos.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        b.score.total_cmp(&a.score)
     });
 
     // Write artifacts including both PR directions.
@@ -4014,7 +3989,7 @@ fn compute_repo_graph_from_live_metadata(
         .iter()
         .map(|r| (r.repo.clone(), r.consumers_pagerank))
         .collect();
-    consumers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    consumers.sort_by(|a, b| b.1.total_cmp(&a.1));
     fs::write(
         out_dir.join("ecosystem.repo_graph.consumers_pagerank.json"),
         serde_json::to_string_pretty(&consumers)?,
@@ -4342,9 +4317,7 @@ fn run_sweep_local(args: &SweepLocalArgs) -> Result<()> {
             for repo in repos {
                 let mut rows = by_repo.remove(&repo).unwrap_or_default();
                 rows.sort_by(|a, b| {
-                    b.pagerank
-                        .partial_cmp(&a.pagerank)
-                        .unwrap_or(std::cmp::Ordering::Equal)
+                    b.pagerank.total_cmp(&a.pagerank)
                 });
                 let mut lines = Vec::new();
                 lines.push(format!("{}: {} workspace crates", repo, rows.len()));
@@ -4435,9 +4408,7 @@ fn run_sweep_local(args: &SweepLocalArgs) -> Result<()> {
                         let mut lines = Vec::new();
                         let mut sorted = rows.clone();
                         sorted.sort_by(|a, b| {
-                            b.pagerank
-                                .partial_cmp(&a.pagerank)
-                                .unwrap_or(std::cmp::Ordering::Equal)
+                            b.pagerank.total_cmp(&a.pagerank)
                         });
                         lines.push(format!("{}: {} workspace crates", repo, sorted.len()));
                         lines.push("------------------------------------------------------------------------".to_string());
@@ -4487,7 +4458,7 @@ fn analyze_rows(args: &AnalyzeArgs) -> Result<Vec<Row>> {
     let metadata = metadata_for(&manifest_path, args)
         .with_context(|| format!("cargo metadata failed for {}", manifest_path.display()))?;
     let (graph, nodes) = build_graph(&metadata, args)?;
-    Ok(compute_rows(&metadata, &graph, &nodes))
+    compute_rows(&metadata, &graph, &nodes)
 }
 
 fn analyze_rows_with_convergence(args: &AnalyzeArgs) -> Result<(Vec<Row>, serde_json::Value)> {
@@ -4495,7 +4466,7 @@ fn analyze_rows_with_convergence(args: &AnalyzeArgs) -> Result<(Vec<Row>, serde_
     let metadata = metadata_for(&manifest_path, args)
         .with_context(|| format!("cargo metadata failed for {}", manifest_path.display()))?;
     let (graph, _nodes) = build_graph(&metadata, args)?;
-    let (mut rows, convergence) = compute_rows_with_convergence(&metadata, &graph);
+    let (mut rows, convergence) = compute_rows_with_convergence(&metadata, &graph)?;
     sort_rows_by_metric(&mut rows, args.metric);
     Ok((rows, convergence))
 }
@@ -4790,44 +4761,31 @@ fn modules_sweep_payload(
                 let top_pr = rows
                     .iter()
                     .max_by(|a, b| {
-                        a.pagerank
-                            .partial_cmp(&b.pagerank)
-                            .unwrap_or(std::cmp::Ordering::Equal)
+                        a.pagerank.total_cmp(&b.pagerank)
                     })
                     .map(|r| serde_json::json!({"node": r.node, "score": r.pagerank}));
                 let top_cons = rows
                     .iter()
                     .max_by(|a, b| {
-                        a.consumers_pagerank
-                            .partial_cmp(&b.consumers_pagerank)
-                            .unwrap_or(std::cmp::Ordering::Equal)
+                        a.consumers_pagerank.total_cmp(&b.consumers_pagerank)
                     })
                     .map(|r| serde_json::json!({"node": r.node, "score": r.consumers_pagerank}));
                 let top_between = rows
                     .iter()
                     .max_by(|a, b| {
-                        a.betweenness
-                            .partial_cmp(&b.betweenness)
-                            .unwrap_or(std::cmp::Ordering::Equal)
+                        a.betweenness.total_cmp(&b.betweenness)
                     })
                     .map(|r| serde_json::json!({"node": r.node, "score": r.betweenness}));
 
                 // Respect top: sort by requested metric and truncate.
                 rows.sort_by(|a, b| match args.metric {
-                    Metric::Pagerank => b
-                        .pagerank
-                        .partial_cmp(&a.pagerank)
-                        .unwrap_or(std::cmp::Ordering::Equal),
-                    Metric::ConsumersPagerank => b
-                        .consumers_pagerank
-                        .partial_cmp(&a.consumers_pagerank)
-                        .unwrap_or(std::cmp::Ordering::Equal),
+                    Metric::Pagerank => b.pagerank.total_cmp(&a.pagerank),
+                    Metric::ConsumersPagerank => {
+                        b.consumers_pagerank.total_cmp(&a.consumers_pagerank)
+                    }
                     Metric::Indegree => b.in_degree.cmp(&a.in_degree),
                     Metric::Outdegree => b.out_degree.cmp(&a.out_degree),
-                    Metric::Betweenness => b
-                        .betweenness
-                        .partial_cmp(&a.betweenness)
-                        .unwrap_or(std::cmp::Ordering::Equal),
+                    Metric::Betweenness => b.betweenness.total_cmp(&a.betweenness),
                 });
                 let rows_returned = rows_total.min(args.top);
                 let truncated = rows_returned < rows_total;
@@ -5094,9 +5052,7 @@ fn run_cratesio(args: &CratesIoArgs) -> Result<()> {
         });
     }
     rows.sort_by(|a, b| {
-        b.pagerank
-            .partial_cmp(&a.pagerank)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        b.pagerank.total_cmp(&a.pagerank)
     });
 
     match args.format {
@@ -5356,14 +5312,10 @@ fn run_view(args: &ViewArgs) -> Result<()> {
             .collect();
 
         first_party.sort_by(|a, b| {
-            b.pagerank
-                .partial_cmp(&a.pagerank)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            b.pagerank.total_cmp(&a.pagerank)
         });
         third_party.sort_by(|a, b| {
-            b.pagerank
-                .partial_cmp(&a.pagerank)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            b.pagerank.total_cmp(&a.pagerank)
         });
 
         html.push_str("<section id=\"local-whole\"><h2>Local: whole-graph ranking (first-party vs third-party)</h2>\n");
@@ -5478,9 +5430,7 @@ fn run_view(args: &ViewArgs) -> Result<()> {
 
                 let mut by_bridge = tlc.clone();
                 by_bridge.sort_by(|a, b| {
-                    b.betweenness
-                        .partial_cmp(&a.betweenness)
-                        .unwrap_or(std::cmp::Ordering::Equal)
+                    b.betweenness.total_cmp(&a.betweenness)
                 });
                 html.push_str("<div><h2>Bridge nodes (betweenness)</h2><table><thead><tr><th>rank</th><th>crate</th><th>betweenness</th></tr></thead><tbody>");
                 for (i, r) in by_bridge.iter().take(15).enumerate() {
