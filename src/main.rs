@@ -1343,25 +1343,19 @@ fn run_modules_sweep(args: &ModulesSweepArgs) -> Result<()> {
                         let top_pr = ok
                             .rows
                             .iter()
-                            .max_by(|a, b| {
-                                a.pagerank.total_cmp(&b.pagerank)
-                            })
+                            .max_by(|a, b| a.pagerank.total_cmp(&b.pagerank))
                             .map(|x| format!("{}({:.3})", x.node, x.pagerank))
                             .unwrap_or_else(|| "-".to_string());
                         let top_cons = ok
                             .rows
                             .iter()
-                            .max_by(|a, b| {
-                                a.consumers_pagerank.total_cmp(&b.consumers_pagerank)
-                            })
+                            .max_by(|a, b| a.consumers_pagerank.total_cmp(&b.consumers_pagerank))
                             .map(|x| format!("{}({:.3})", x.node, x.consumers_pagerank))
                             .unwrap_or_else(|| "-".to_string());
                         let top_between = ok
                             .rows
                             .iter()
-                            .max_by(|a, b| {
-                                a.betweenness.total_cmp(&b.betweenness)
-                            })
+                            .max_by(|a, b| a.betweenness.total_cmp(&b.betweenness))
                             .map(|x| format!("{}({:.3})", x.node, x.betweenness))
                             .unwrap_or_else(|| "-".to_string());
                         println!(
@@ -1736,9 +1730,7 @@ fn run_modules_core(
         .collect();
 
     // Default ordering: dependency PageRank.
-    rows.sort_by(|a, b| {
-        b.pagerank.total_cmp(&a.pagerank)
-    });
+    rows.sort_by(|a, b| b.pagerank.total_cmp(&a.pagerank));
 
     let mut top_edges: Vec<(String, String, f64)> = Vec::new();
     if args.edges_top > 0 {
@@ -1961,9 +1953,7 @@ fn print_modules_text(
     let mut sorted: Vec<&ModuleRow> = rows.iter().collect();
     sorted.sort_by(|a, b| match args.metric {
         Metric::Pagerank => b.pagerank.total_cmp(&a.pagerank),
-        Metric::ConsumersPagerank => b
-            .consumers_pagerank
-            .total_cmp(&a.consumers_pagerank),
+        Metric::ConsumersPagerank => b.consumers_pagerank.total_cmp(&a.consumers_pagerank),
         Metric::Indegree => b.in_degree.cmp(&a.in_degree),
         Metric::Outdegree => b.out_degree.cmp(&a.out_degree),
         Metric::Betweenness => b.betweenness.total_cmp(&a.betweenness),
@@ -2813,9 +2803,7 @@ fn compute_rows(
         });
     }
 
-    rows.sort_by(|a, b| {
-        b.pagerank.total_cmp(&a.pagerank)
-    });
+    rows.sort_by(|a, b| b.pagerank.total_cmp(&a.pagerank));
     Ok(rows)
 }
 
@@ -2880,9 +2868,7 @@ fn compute_rows_with_convergence(
 
     // Note: sorting for presentation is a policy choice.
     // We sort by the requested metric elsewhere (CLI/MCP), but keep a deterministic default here.
-    rows.sort_by(|a, b| {
-        b.pagerank.total_cmp(&a.pagerank)
-    });
+    rows.sort_by(|a, b| b.pagerank.total_cmp(&a.pagerank));
 
     let convergence = serde_json::json!({
         "pagerank": convergence_report(&pr_run),
@@ -2914,9 +2900,7 @@ fn print_text(rows: &[Row], metric: Metric, top: usize, nodes: usize, edges: usi
     let mut sorted: Vec<&Row> = rows.iter().collect();
     sorted.sort_by(|a, b| match metric {
         Metric::Pagerank => b.pagerank.total_cmp(&a.pagerank),
-        Metric::ConsumersPagerank => b
-            .consumers_pagerank
-            .total_cmp(&a.consumers_pagerank),
+        Metric::ConsumersPagerank => b.consumers_pagerank.total_cmp(&a.consumers_pagerank),
         Metric::Indegree => b.in_degree.cmp(&a.in_degree),
         Metric::Outdegree => b.out_degree.cmp(&a.out_degree),
         Metric::Betweenness => b.betweenness.total_cmp(&a.betweenness),
@@ -3611,9 +3595,7 @@ fn compute_tlc_crates(root: &Path, out_dir: &Path) -> Result<Vec<TlcCrateRow>> {
         });
     }
 
-    tlc.sort_by(|a, b| {
-        b.score.total_cmp(&a.score)
-    });
+    tlc.sort_by(|a, b| b.score.total_cmp(&a.score));
     fs::write(
         out_dir.join("tlc.crates.json"),
         serde_json::to_string_pretty(&tlc)?,
@@ -3855,9 +3837,7 @@ fn compute_repo_graph_from_live_metadata(
             git_days_since_last_commit: gs.days_since_last_commit,
         });
     }
-    rows.sort_by(|a, b| {
-        b.pagerank.total_cmp(&a.pagerank)
-    });
+    rows.sort_by(|a, b| b.pagerank.total_cmp(&a.pagerank));
 
     // Axis totals for depends_pr.
     let mut totals: HashMap<String, f64> = HashMap::new();
@@ -3963,9 +3943,7 @@ fn compute_repo_graph_from_live_metadata(
             git_days_since_last_commit: r.git_days_since_last_commit,
         });
     }
-    tlc_repos.sort_by(|a, b| {
-        b.score.total_cmp(&a.score)
-    });
+    tlc_repos.sort_by(|a, b| b.score.total_cmp(&a.score));
 
     // Write artifacts including both PR directions.
     fs::write(
@@ -4316,9 +4294,7 @@ fn run_sweep_local(args: &SweepLocalArgs) -> Result<()> {
             repos.sort();
             for repo in repos {
                 let mut rows = by_repo.remove(&repo).unwrap_or_default();
-                rows.sort_by(|a, b| {
-                    b.pagerank.total_cmp(&a.pagerank)
-                });
+                rows.sort_by(|a, b| b.pagerank.total_cmp(&a.pagerank));
                 let mut lines = Vec::new();
                 lines.push(format!("{}: {} workspace crates", repo, rows.len()));
                 lines.push(
@@ -4407,9 +4383,7 @@ fn run_sweep_local(args: &SweepLocalArgs) -> Result<()> {
                         // Small text file too.
                         let mut lines = Vec::new();
                         let mut sorted = rows.clone();
-                        sorted.sort_by(|a, b| {
-                            b.pagerank.total_cmp(&a.pagerank)
-                        });
+                        sorted.sort_by(|a, b| b.pagerank.total_cmp(&a.pagerank));
                         lines.push(format!("{}: {} workspace crates", repo, sorted.len()));
                         lines.push("------------------------------------------------------------------------".to_string());
                         for (i, r) in sorted.iter().take(args.top).enumerate() {
@@ -4760,21 +4734,15 @@ fn modules_sweep_payload(
                 let rows_total = rows.len();
                 let top_pr = rows
                     .iter()
-                    .max_by(|a, b| {
-                        a.pagerank.total_cmp(&b.pagerank)
-                    })
+                    .max_by(|a, b| a.pagerank.total_cmp(&b.pagerank))
                     .map(|r| serde_json::json!({"node": r.node, "score": r.pagerank}));
                 let top_cons = rows
                     .iter()
-                    .max_by(|a, b| {
-                        a.consumers_pagerank.total_cmp(&b.consumers_pagerank)
-                    })
+                    .max_by(|a, b| a.consumers_pagerank.total_cmp(&b.consumers_pagerank))
                     .map(|r| serde_json::json!({"node": r.node, "score": r.consumers_pagerank}));
                 let top_between = rows
                     .iter()
-                    .max_by(|a, b| {
-                        a.betweenness.total_cmp(&b.betweenness)
-                    })
+                    .max_by(|a, b| a.betweenness.total_cmp(&b.betweenness))
                     .map(|r| serde_json::json!({"node": r.node, "score": r.betweenness}));
 
                 // Respect top: sort by requested metric and truncate.
@@ -5051,9 +5019,7 @@ fn run_cratesio(args: &CratesIoArgs) -> Result<()> {
             betweenness: bc[node.index()],
         });
     }
-    rows.sort_by(|a, b| {
-        b.pagerank.total_cmp(&a.pagerank)
-    });
+    rows.sort_by(|a, b| b.pagerank.total_cmp(&a.pagerank));
 
     match args.format {
         OutputFormat::Json => {
@@ -5311,12 +5277,8 @@ fn run_view(args: &ViewArgs) -> Result<()> {
             })
             .collect();
 
-        first_party.sort_by(|a, b| {
-            b.pagerank.total_cmp(&a.pagerank)
-        });
-        third_party.sort_by(|a, b| {
-            b.pagerank.total_cmp(&a.pagerank)
-        });
+        first_party.sort_by(|a, b| b.pagerank.total_cmp(&a.pagerank));
+        third_party.sort_by(|a, b| b.pagerank.total_cmp(&a.pagerank));
 
         html.push_str("<section id=\"local-whole\"><h2>Local: whole-graph ranking (first-party vs third-party)</h2>\n");
         html.push_str("<p>This uses <code>cargo metadata</code> on the root workspace with <code>--workspace-only=false</code>, so registry/git deps are included and labeled.</p>\n");
@@ -5429,9 +5391,7 @@ fn run_view(args: &ViewArgs) -> Result<()> {
                 html.push_str("</tbody></table></div>");
 
                 let mut by_bridge = tlc.clone();
-                by_bridge.sort_by(|a, b| {
-                    b.betweenness.total_cmp(&a.betweenness)
-                });
+                by_bridge.sort_by(|a, b| b.betweenness.total_cmp(&a.betweenness));
                 html.push_str("<div><h2>Bridge nodes (betweenness)</h2><table><thead><tr><th>rank</th><th>crate</th><th>betweenness</th></tr></thead><tbody>");
                 for (i, r) in by_bridge.iter().take(15).enumerate() {
                     html.push_str(&format!(

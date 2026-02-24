@@ -69,9 +69,7 @@ impl PageRankConfig {
             return Err(Error::invalid_parameter("max_iterations must be > 0"));
         }
         if !self.tolerance.is_finite() || self.tolerance <= 0.0 {
-            return Err(Error::invalid_parameter(
-                "tolerance must be finite and > 0",
-            ));
+            return Err(Error::invalid_parameter("tolerance must be finite and > 0"));
         }
         Ok(())
     }
@@ -269,7 +267,9 @@ pub fn pagerank_weighted_checked_run<N>(
             return Err(Error::invalid_parameter("edge weights must be finite"));
         }
         if w < 0.0 {
-            return Err(Error::invalid_parameter("edge weights must be non-negative"));
+            return Err(Error::invalid_parameter(
+                "edge weights must be non-negative",
+            ));
         }
     }
     Ok(pagerank_weighted_run(graph, config))
@@ -459,7 +459,8 @@ where
         sigma[s.index()] = 1.0;
         dist[s.index()] = 0;
 
-        let mut queue: std::collections::VecDeque<NodeIndex<Ix>> = std::collections::VecDeque::new();
+        let mut queue: std::collections::VecDeque<NodeIndex<Ix>> =
+            std::collections::VecDeque::new();
         queue.push_back(s);
 
         while let Some(v) = queue.pop_front() {
@@ -496,4 +497,3 @@ where
     }
     betweenness
 }
-
