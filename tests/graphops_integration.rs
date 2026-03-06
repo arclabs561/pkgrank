@@ -286,8 +286,7 @@ fn weighted_pagerank_checked_rejects_nan_weight() {
 
 #[test]
 fn weighted_pagerank_cycle_uniform_weights() {
-    let g =
-        graph_from_weighted_edges(&["A", "B", "C"], &[(0, 1, 1.0), (1, 2, 1.0), (2, 0, 1.0)]);
+    let g = graph_from_weighted_edges(&["A", "B", "C"], &[(0, 1, 1.0), (1, 2, 1.0), (2, 0, 1.0)]);
     let scores = pagerank_weighted(&g, PageRankConfig::default());
     let expected = 1.0 / 3.0;
     for (i, &s) in scores.iter().enumerate() {
