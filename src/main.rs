@@ -23,7 +23,6 @@ use std::process::Command as ProcessCommand;
 use std::time::Instant;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-mod graphops;
 #[cfg(feature = "stdio")]
 mod mcp;
 #[cfg(feature = "stdio")]
