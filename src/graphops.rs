@@ -503,7 +503,10 @@ mod tests {
     use super::*;
 
     /// Helper: build a DiGraph<&str, f64> from labeled edges.
-    fn graph_from_edges(labels: &[&'static str], edges: &[(usize, usize)]) -> DiGraph<&'static str, f64> {
+    fn graph_from_edges(
+        labels: &[&'static str],
+        edges: &[(usize, usize)],
+    ) -> DiGraph<&'static str, f64> {
         let mut g = DiGraph::new();
         let nodes: Vec<_> = labels.iter().map(|l| g.add_node(*l)).collect();
         for &(u, v) in edges {
@@ -527,7 +530,10 @@ mod tests {
         g.add_node(());
         let scores = pagerank(&g, PageRankConfig::default());
         assert_eq!(scores.len(), 1);
-        assert!((scores[0] - 1.0).abs() < 1e-6, "lone node should have score 1.0");
+        assert!(
+            (scores[0] - 1.0).abs() < 1e-6,
+            "lone node should have score 1.0"
+        );
     }
 
     #[test]
@@ -563,10 +569,7 @@ mod tests {
 
     #[test]
     fn pagerank_scores_sum_to_one() {
-        let g = graph_from_edges(
-            &["A", "B", "C", "D"],
-            &[(0, 1), (0, 2), (1, 3), (2, 3)],
-        );
+        let g = graph_from_edges(&["A", "B", "C", "D"], &[(0, 1), (0, 2), (1, 3), (2, 3)]);
         let scores = pagerank(&g, PageRankConfig::default());
         let total: f64 = scores.iter().sum();
         assert!(
@@ -612,7 +615,10 @@ mod tests {
         let g = graph_from_edges(&["C", "L1", "L2", "L3"], &[(0, 1), (0, 2), (0, 3)]);
         let bc = betweenness_centrality(&g);
         for (i, &b) in bc.iter().enumerate() {
-            assert!(b.abs() < 1e-9, "node {i}: expected 0 betweenness in out-star, got {b}");
+            assert!(
+                b.abs() < 1e-9,
+                "node {i}: expected 0 betweenness in out-star, got {b}"
+            );
         }
     }
 
@@ -680,6 +686,6 @@ mod tests {
         let (dependents, dependencies) = reachability_counts_edges(3, &edges);
         assert_eq!(dependencies[0], 1); // 0 reaches 1
         assert_eq!(dependencies[1], 0); // edge to 99 ignored
-        assert_eq!(dependents[1], 1);   // 0 reaches 1
+        assert_eq!(dependents[1], 1); // 0 reaches 1
     }
 }
