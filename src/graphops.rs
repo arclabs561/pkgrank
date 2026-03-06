@@ -688,4 +688,247 @@ mod tests {
         assert_eq!(dependencies[1], 0); // edge to 99 ignored
         assert_eq!(dependents[1], 1); // 0 reaches 1
     }
+
+    /// Helper: build a DiGraph<&str, f64> from labeled edges with explicit weights.
+    fn graph_from_weighted_edges(
+        labels: &[&'static str],
+        edges: &[(usize, usize, f64)],
+    ) -> DiGraph<&'static str, f64> {
+        let mut g = DiGraph::new();
+        let nodes: Vec<_> = labels.iter().map(|l| g.add_node(*l)).collect();
+        for &(u, v, w) in edges {
+            g.add_edge(nodes[u], nodes[v], w);
+        }
+        g
+    }
+
+    // ---- weighted pagerank ----
+
+    #[test]
+    fn weighted_pagerank_uniform_weights_match_unweighted() {
+        // When all edge weights are equal (1.0), weighted PageRank should produce
+        // the same scores as unweighted PageRank.
+        let g = graph_from_edges(&["A", "B", "C", "D"], &[(0, 1), (0, 2), (1, 3), (2, 3)]);
+        let cfg = PageRankConfig::default();
+        let unweighted = pagerank(&g, cfg);
+        let weighted = pagerank_weighted(&g, cfg);
+        assert_eq!(unweighted.len(), weighted.len());
+        for (i, (u, w)) in unweighted.iter().zip(weighted.iter()).enumerate() {
+            assert!(
+                (u - w).abs() < 1e-10,
+                "node {i}: unweighted={u}, weighted={w} -- should match for uniform weights"
+            );
+        }
+    }
+
+    #[test]
+    fn weighted_pagerank_heavy_edge_concentrates_rank() {
+        // A -> B (weight 100), A -> C (weight 1).
+        // B should receive more rank than C because A's outgoing mass
+        // is split proportionally to edge weight.
+        //
+        // Also compare against uniform weights (A -> B = 1, A -> C = 1) to
+        // confirm the heavy weight shifts mass toward B.
+        let g_heavy = graph_from_weighted_edges(&["A", "B", "C"], &[(0, 1, 100.0), (0, 2, 1.0)]);
+        let scores_heavy = pagerank_weighted(&g_heavy, PageRankConfig::default());
+        assert!(
+            scores_heavy[1] > scores_heavy[2],
+            "B (heavy edge) should have higher rank than C: B={}, C={}",
+            scores_heavy[1],
+            scores_heavy[2]
+        );
+
+        // With uniform weights, B and C should be equal (symmetric sinks).
+        let g_uniform = graph_from_weighted_edges(&["A", "B", "C"], &[(0, 1, 1.0), (0, 2, 1.0)]);
+        let scores_uniform = pagerank_weighted(&g_uniform, PageRankConfig::default());
+        assert!(
+            (scores_uniform[1] - scores_uniform[2]).abs() < 1e-6,
+            "uniform weights: B and C should be equal: B={}, C={}",
+            scores_uniform[1],
+            scores_uniform[2]
+        );
+
+        // The heavy-weight B should get more rank than the uniform-weight B.
+        assert!(
+            scores_heavy[1] > scores_uniform[1],
+            "heavy-weighted B should exceed uniform B: heavy={}, uniform={}",
+            scores_heavy[1],
+            scores_uniform[1]
+        );
+    }
+
+    #[test]
+    fn weighted_pagerank_scores_sum_to_one() {
+        let g = graph_from_weighted_edges(
+            &["A", "B", "C", "D"],
+            &[(0, 1, 3.0), (0, 2, 1.0), (1, 3, 2.0), (2, 3, 5.0)],
+        );
+        let scores = pagerank_weighted(&g, PageRankConfig::default());
+        let total: f64 = scores.iter().sum();
+        assert!(
+            (total - 1.0).abs() < 1e-6,
+            "weighted PageRank scores should sum to 1.0, got {total}"
+        );
+    }
+
+    #[test]
+    fn weighted_pagerank_empty_graph() {
+        let g: DiGraph<(), f64> = DiGraph::new();
+        let scores = pagerank_weighted(&g, PageRankConfig::default());
+        assert!(scores.is_empty());
+    }
+
+    #[test]
+    fn weighted_pagerank_single_node() {
+        let mut g: DiGraph<&str, f64> = DiGraph::new();
+        g.add_node("A");
+        let scores = pagerank_weighted(&g, PageRankConfig::default());
+        assert_eq!(scores.len(), 1);
+        assert!(
+            (scores[0] - 1.0).abs() < 1e-6,
+            "lone node should have score 1.0, got {}",
+            scores[0]
+        );
+    }
+
+    #[test]
+    fn weighted_pagerank_checked_rejects_negative_weight() {
+        let g = graph_from_weighted_edges(&["A", "B"], &[(0, 1, -1.0)]);
+        let result = pagerank_weighted_checked(&g, PageRankConfig::default());
+        assert!(result.is_err(), "negative edge weight should be rejected");
+    }
+
+    #[test]
+    fn weighted_pagerank_checked_rejects_nan_weight() {
+        let g = graph_from_weighted_edges(&["A", "B"], &[(0, 1, f64::NAN)]);
+        let result = pagerank_weighted_checked(&g, PageRankConfig::default());
+        assert!(result.is_err(), "NaN edge weight should be rejected");
+    }
+
+    #[test]
+    fn weighted_pagerank_cycle_uniform_weights() {
+        // Cycle A -> B -> C -> A with equal weights: scores should be equal.
+        let g =
+            graph_from_weighted_edges(&["A", "B", "C"], &[(0, 1, 1.0), (1, 2, 1.0), (2, 0, 1.0)]);
+        let scores = pagerank_weighted(&g, PageRankConfig::default());
+        let expected = 1.0 / 3.0;
+        for (i, &s) in scores.iter().enumerate() {
+            assert!(
+                (s - expected).abs() < 1e-6,
+                "node {i}: expected ~{expected}, got {s}"
+            );
+        }
+    }
+
+    // ---- personalized pagerank ----
+
+    #[test]
+    fn ppr_personalized_node_gets_highest_score() {
+        // Chain: A -> B -> C -> D. Personalize to D (the sink).
+        // D should get the highest score because teleport always goes to D.
+        let g = graph_from_edges(&["A", "B", "C", "D"], &[(0, 1), (1, 2), (2, 3)]);
+        let pers = vec![0.0, 0.0, 0.0, 1.0]; // all teleport mass to D
+        let scores = personalized_pagerank(&g, PageRankConfig::default(), &pers);
+        let max_idx = scores
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap()
+            .0;
+        assert_eq!(
+            max_idx, 3,
+            "node D (personalized) should have the highest PPR score"
+        );
+    }
+
+    #[test]
+    fn ppr_star_center_vs_leaf_personalization() {
+        // Star: center(0) -> leaf1(1), center(0) -> leaf2(2), center(0) -> leaf3(3).
+        //
+        // When personalized to center, center gets a high score because teleport
+        // always returns to it. When personalized to leaf1, leaf1 gets a higher
+        // score relative to the other leaves.
+        let g = graph_from_edges(&["center", "L1", "L2", "L3"], &[(0, 1), (0, 2), (0, 3)]);
+        let cfg = PageRankConfig::default();
+
+        // Personalize to center.
+        let pers_center = vec![1.0, 0.0, 0.0, 0.0];
+        let scores_center = personalized_pagerank(&g, cfg, &pers_center);
+        assert!(
+            scores_center[0] > scores_center[1],
+            "center should score higher than any leaf when personalized to center"
+        );
+        // All leaves should be equal by symmetry.
+        assert!(
+            (scores_center[1] - scores_center[2]).abs() < 1e-6
+                && (scores_center[2] - scores_center[3]).abs() < 1e-6,
+            "leaves should have equal scores by symmetry: {:?}",
+            &scores_center[1..4]
+        );
+
+        // Personalize to leaf1.
+        let pers_leaf = vec![0.0, 1.0, 0.0, 0.0];
+        let scores_leaf = personalized_pagerank(&g, cfg, &pers_leaf);
+        assert!(
+            scores_leaf[1] > scores_leaf[2],
+            "leaf1 should score higher than leaf2 when personalized to leaf1"
+        );
+        assert!(
+            scores_leaf[1] > scores_leaf[3],
+            "leaf1 should score higher than leaf3 when personalized to leaf1"
+        );
+    }
+
+    #[test]
+    fn ppr_scores_sum_to_one() {
+        let g = graph_from_edges(&["A", "B", "C", "D"], &[(0, 1), (0, 2), (1, 3), (2, 3)]);
+        let pers = vec![0.5, 0.5, 0.0, 0.0];
+        let scores = personalized_pagerank(&g, PageRankConfig::default(), &pers);
+        let total: f64 = scores.iter().sum();
+        assert!(
+            (total - 1.0).abs() < 1e-6,
+            "PPR scores should sum to 1.0, got {total}"
+        );
+    }
+
+    #[test]
+    fn ppr_uniform_personalization_matches_standard_pagerank() {
+        // When personalization is uniform, PPR should produce the same result
+        // as standard (unweighted) PageRank.
+        let g = graph_from_edges(&["A", "B", "C", "D"], &[(0, 1), (0, 2), (1, 3), (2, 3)]);
+        let cfg = PageRankConfig::default();
+        let standard = pagerank(&g, cfg);
+        let pers = vec![0.25, 0.25, 0.25, 0.25];
+        let ppr = personalized_pagerank(&g, cfg, &pers);
+        for (i, (s, p)) in standard.iter().zip(ppr.iter()).enumerate() {
+            assert!(
+                (s - p).abs() < 1e-6,
+                "node {i}: standard={s}, PPR(uniform)={p} -- should match"
+            );
+        }
+    }
+
+    #[test]
+    fn ppr_empty_graph() {
+        let g: DiGraph<(), f64> = DiGraph::new();
+        let scores = personalized_pagerank(&g, PageRankConfig::default(), &[]);
+        assert!(scores.is_empty());
+    }
+
+    #[test]
+    fn ppr_zero_personalization_falls_back_to_uniform() {
+        // When all personalization values are 0, the implementation normalizes
+        // to uniform, so it should behave like standard PageRank.
+        let g = graph_from_edges(&["A", "B", "C"], &[(0, 1), (1, 2), (2, 0)]);
+        let cfg = PageRankConfig::default();
+        let standard = pagerank(&g, cfg);
+        let pers = vec![0.0, 0.0, 0.0];
+        let ppr = personalized_pagerank(&g, cfg, &pers);
+        for (i, (s, p)) in standard.iter().zip(ppr.iter()).enumerate() {
+            assert!(
+                (s - p).abs() < 1e-6,
+                "node {i}: standard={s}, PPR(zero)={p} -- should match for zero personalization"
+            );
+        }
+    }
 }
