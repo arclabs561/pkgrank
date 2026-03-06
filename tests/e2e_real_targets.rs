@@ -13,8 +13,51 @@ fn parse_json_stdout(cmd: &mut Command) -> serde_json::Value {
 }
 
 #[test]
-fn analyze_on_real_workspace_root_cargo_toml() {
-    // This is the "real" target: the dev super-workspace root Cargo.toml.
+fn analyze_on_own_cargo_toml() {
+    // Analyze pkgrank's own Cargo.toml -- self-contained, no sibling deps.
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("pkgrank"));
+    cmd.args(["--format", "json", "--metric", "pagerank", "-n", "5", "."]);
+    let v = parse_json_stdout(&mut cmd);
+    assert_eq!(v.get("schema_version").and_then(|x| x.as_u64()), Some(1));
+    assert_eq!(v.get("ok").and_then(|x| x.as_bool()), Some(true));
+    assert_eq!(v.get("command").and_then(|x| x.as_str()), Some("analyze"));
+    assert!(v.get("metric").and_then(|x| x.as_str()).is_some());
+    assert!(v.get("sorted_by").and_then(|x| x.as_str()).is_some());
+    assert!(v.get("convergence").is_some());
+    assert!(v.get("rows").and_then(|x| x.as_array()).is_some());
+}
+
+#[test]
+fn analyze_consumers_pagerank_on_own_graph() {
+    // Use-case: "what are the orchestrators / top-level consumers?"
+    // Runs against pkgrank's own dependency graph -- no sibling repos needed.
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("pkgrank"));
+    cmd.args([
+        "--format",
+        "json",
+        "--workspace-only=false",
+        "--metric",
+        "consumers-pagerank",
+        "-n",
+        "10",
+        ".",
+    ]);
+    let v = parse_json_stdout(&mut cmd);
+    let rows = v
+        .get("rows")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(!rows.is_empty());
+}
+
+// Super-workspace tests: require PKGRANK_E2E_SUPERWORKSPACE=1 and sibling repos.
+// These exercise cross-repo analysis but are opt-in since they depend on local layout.
+#[test]
+fn analyze_on_super_workspace_root() {
+    if std::env::var("PKGRANK_E2E_SUPERWORKSPACE").ok().as_deref() != Some("1") {
+        return;
+    }
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("pkgrank"));
     cmd.args([
         "--format",
@@ -27,36 +70,8 @@ fn analyze_on_real_workspace_root_cargo_toml() {
         "..",
     ]);
     let v = parse_json_stdout(&mut cmd);
-    assert_eq!(v.get("schema_version").and_then(|x| x.as_u64()), Some(1));
     assert_eq!(v.get("ok").and_then(|x| x.as_bool()), Some(true));
-    assert_eq!(v.get("command").and_then(|x| x.as_str()), Some("analyze"));
-    assert!(v.get("metric").and_then(|x| x.as_str()).is_some());
-    assert!(v.get("sorted_by").and_then(|x| x.as_str()).is_some());
-    assert!(v.get("convergence").is_some());
     assert!(v.get("rows").and_then(|x| x.as_array()).is_some());
-}
-
-#[test]
-fn analyze_consumers_pagerank_on_lattix_core_is_nonempty() {
-    // Use-case: "what are the orchestrators / top-level consumers?"
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("pkgrank"));
-    cmd.args([
-        "--format",
-        "json",
-        "--workspace-only=false",
-        "--metric",
-        "consumers-pagerank",
-        "-n",
-        "10",
-        "../lattix/core/lattix-core",
-    ]);
-    let v = parse_json_stdout(&mut cmd);
-    let rows = v
-        .get("rows")
-        .and_then(|x| x.as_array())
-        .cloned()
-        .unwrap_or_default();
-    assert!(!rows.is_empty());
 }
 
 #[test]

@@ -1919,4 +1919,4 @@ checksum = "94f63c051f4fe3c1509da62131a678643c5b6fbdc9273b2b79d4378ebda003d2"
 
 [[patch.unused]]
 name = "textprep"
-version = "0.1.0"
+version = "0.1.1"

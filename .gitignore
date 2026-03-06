@@ -4,3 +4,4 @@ target/
 # pkgrank artifacts (default under super-workspace root; keep here for safety if run in-repo)
 evals/pkgrank/
 runs/
+.claude/reports/

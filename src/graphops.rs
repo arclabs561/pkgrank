@@ -497,3 +497,189 @@ where
     }
     betweenness
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: build a DiGraph<&str, f64> from labeled edges.
+    fn graph_from_edges(labels: &[&'static str], edges: &[(usize, usize)]) -> DiGraph<&'static str, f64> {
+        let mut g = DiGraph::new();
+        let nodes: Vec<_> = labels.iter().map(|l| g.add_node(*l)).collect();
+        for &(u, v) in edges {
+            g.add_edge(nodes[u], nodes[v], 1.0);
+        }
+        g
+    }
+
+    // ---- pagerank ----
+
+    #[test]
+    fn pagerank_empty_graph() {
+        let g: DiGraph<(), f64> = DiGraph::new();
+        let scores = pagerank(&g, PageRankConfig::default());
+        assert!(scores.is_empty());
+    }
+
+    #[test]
+    fn pagerank_single_node() {
+        let mut g: DiGraph<(), f64> = DiGraph::new();
+        g.add_node(());
+        let scores = pagerank(&g, PageRankConfig::default());
+        assert_eq!(scores.len(), 1);
+        assert!((scores[0] - 1.0).abs() < 1e-6, "lone node should have score 1.0");
+    }
+
+    #[test]
+    fn pagerank_chain_last_node_highest() {
+        // Chain: A -> B -> C -> D. All mass flows toward D (the sink),
+        // so D should have the highest score.
+        let g = graph_from_edges(&["A", "B", "C", "D"], &[(0, 1), (1, 2), (2, 3)]);
+        let scores = pagerank(&g, PageRankConfig::default());
+        assert_eq!(scores.len(), 4);
+        // D (sink) should have the highest score.
+        let max_idx = scores
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap()
+            .0;
+        assert_eq!(max_idx, 3, "sink node D should have highest PageRank");
+    }
+
+    #[test]
+    fn pagerank_cycle_uniform() {
+        // Cycle: A -> B -> C -> A. By symmetry all scores should be equal.
+        let g = graph_from_edges(&["A", "B", "C"], &[(0, 1), (1, 2), (2, 0)]);
+        let scores = pagerank(&g, PageRankConfig::default());
+        let expected = 1.0 / 3.0;
+        for (i, &s) in scores.iter().enumerate() {
+            assert!(
+                (s - expected).abs() < 1e-6,
+                "node {i}: expected ~{expected}, got {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn pagerank_scores_sum_to_one() {
+        let g = graph_from_edges(
+            &["A", "B", "C", "D"],
+            &[(0, 1), (0, 2), (1, 3), (2, 3)],
+        );
+        let scores = pagerank(&g, PageRankConfig::default());
+        let total: f64 = scores.iter().sum();
+        assert!(
+            (total - 1.0).abs() < 1e-6,
+            "PageRank scores should sum to 1.0, got {total}"
+        );
+    }
+
+    // ---- betweenness_centrality ----
+
+    #[test]
+    fn betweenness_path_graph_center_highest() {
+        // Path: 0 -> 1 -> 2 -> 3 -> 4. Node 2 is on the most shortest paths
+        // and should have the highest betweenness centrality.
+        let g = graph_from_edges(
+            &["0", "1", "2", "3", "4"],
+            &[(0, 1), (1, 2), (2, 3), (3, 4)],
+        );
+        let bc = betweenness_centrality(&g);
+        assert_eq!(bc.len(), 5);
+        // Endpoints (0, 4) should have 0 betweenness (never on a shortest path between others).
+        assert!(bc[0].abs() < 1e-9, "endpoint 0 should have 0 betweenness");
+        assert!(bc[4].abs() < 1e-9, "endpoint 4 should have 0 betweenness");
+        // Center node 2 should have the highest value.
+        let max_idx = bc
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap()
+            .0;
+        assert_eq!(max_idx, 2, "center node should have highest betweenness");
+        // Symmetry: bc[1] == bc[3] (equidistant from center in a directed path).
+        assert!(
+            (bc[1] - bc[3]).abs() < 1e-9,
+            "nodes 1 and 3 should have equal betweenness"
+        );
+    }
+
+    #[test]
+    fn betweenness_star_center_highest() {
+        // Star: center 0 -> {1, 2, 3}. No shortest paths pass through 0 in a
+        // directed sense (leaves are sinks), so betweenness is 0 for all.
+        let g = graph_from_edges(&["C", "L1", "L2", "L3"], &[(0, 1), (0, 2), (0, 3)]);
+        let bc = betweenness_centrality(&g);
+        for (i, &b) in bc.iter().enumerate() {
+            assert!(b.abs() < 1e-9, "node {i}: expected 0 betweenness in out-star, got {b}");
+        }
+    }
+
+    #[test]
+    fn betweenness_two_nodes_is_zero() {
+        // With n <= 2 the function returns zeros (no pair (s,t) with s!=t!=v).
+        let g = graph_from_edges(&["A", "B"], &[(0, 1)]);
+        let bc = betweenness_centrality(&g);
+        assert_eq!(bc, vec![0.0; 2]);
+    }
+
+    // ---- reachability_counts_edges ----
+
+    #[test]
+    fn reachability_chain() {
+        // 0 -> 1 -> 2 -> 3
+        let edges = vec![(0, 1), (1, 2), (2, 3)];
+        let (dependents, dependencies) = reachability_counts_edges(4, &edges);
+
+        // dependencies[i] = how many nodes reachable from i
+        assert_eq!(dependencies[0], 3); // 0 reaches 1,2,3
+        assert_eq!(dependencies[1], 2); // 1 reaches 2,3
+        assert_eq!(dependencies[2], 1); // 2 reaches 3
+        assert_eq!(dependencies[3], 0); // 3 reaches nobody
+
+        // dependents[i] = how many nodes can reach i
+        assert_eq!(dependents[0], 0); // nobody reaches 0
+        assert_eq!(dependents[1], 1); // 0 reaches 1
+        assert_eq!(dependents[2], 2); // 0,1 reach 2
+        assert_eq!(dependents[3], 3); // 0,1,2 reach 3
+    }
+
+    #[test]
+    fn reachability_diamond() {
+        // Diamond: 0 -> 1, 0 -> 2, 1 -> 3, 2 -> 3
+        let edges = vec![(0, 1), (0, 2), (1, 3), (2, 3)];
+        let (dependents, dependencies) = reachability_counts_edges(4, &edges);
+
+        assert_eq!(dependencies[0], 3); // 0 reaches 1,2,3
+        assert_eq!(dependencies[1], 1); // 1 reaches 3
+        assert_eq!(dependencies[2], 1); // 2 reaches 3
+        assert_eq!(dependencies[3], 0); // 3 is a sink
+
+        assert_eq!(dependents[0], 0);
+        assert_eq!(dependents[1], 1); // 0
+        assert_eq!(dependents[2], 1); // 0
+        assert_eq!(dependents[3], 3); // 0,1,2
+    }
+
+    #[test]
+    fn reachability_cycle() {
+        // Cycle: 0 -> 1 -> 2 -> 0. Every node reaches every other node.
+        let edges = vec![(0, 1), (1, 2), (2, 0)];
+        let (dependents, dependencies) = reachability_counts_edges(3, &edges);
+        for i in 0..3 {
+            assert_eq!(dependencies[i], 2, "node {i} dependencies");
+            assert_eq!(dependents[i], 2, "node {i} dependents");
+        }
+    }
+
+    #[test]
+    fn reachability_out_of_bounds_edges_ignored() {
+        // Edges referencing nodes >= n should be silently skipped.
+        let edges = vec![(0, 1), (1, 99)];
+        let (dependents, dependencies) = reachability_counts_edges(3, &edges);
+        assert_eq!(dependencies[0], 1); // 0 reaches 1
+        assert_eq!(dependencies[1], 0); // edge to 99 ignored
+        assert_eq!(dependents[1], 1);   // 0 reaches 1
+    }
+}
