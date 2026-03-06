@@ -5,3 +5,4 @@ target/
 evals/pkgrank/
 runs/
 .claude/reports/
+.claude/settings.local.json
