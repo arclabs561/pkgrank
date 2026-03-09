@@ -4,12 +4,8 @@
 
 ## Install
 
-This repo is currently `publish = false` (not on crates.io). Install from source:
-
 ```bash
-git clone https://github.com/arclabs561/pkgrank
-cd pkgrank
-cargo install --path .
+cargo install pkgrank
 pkgrank --help
 ```
 
