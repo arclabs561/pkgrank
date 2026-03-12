@@ -18,8 +18,10 @@ Reports go in `.claude/reports/qa-YYYY-MM-DD.md` (gitignored). Append a `-suffix
 
 ### 0. Read prior QA reports
 
+Check for prior reports in order: `.claude/reports/`, `qa/reports/`, `.qa/reports/`, `.claude/` root (flat files like `audit-report.md`). Read the most recent found. If reports exist in old locations, move them to `.claude/reports/` with dated names before proceeding.
+
 ```bash
-eza --sort=modified -r .claude/reports/qa-*.md 2>/dev/null | head -3
+eza --sort=modified -r .claude/reports/qa-*.md qa/reports/qa-*.md 2>/dev/null | head -3
 ```
 
 Read the most recent 1-2 reports if they exist. Note open issues to watch for.

@@ -6,8 +6,10 @@ Audit the structural design: module decomposition, graph model correctness, MCP 
 
 ### 0. Read prior arch reports
 
+Check for prior reports in order: `.claude/reports/`, `qa/reports/`, `.qa/reports/`, `.claude/` root (flat files like `audit-report.md`). Read the most recent found. If reports exist in old locations, move them to `.claude/reports/` with dated names before proceeding.
+
 ```bash
-eza --sort=modified -r .claude/reports/arch-*.md 2>/dev/null | head -3
+eza --sort=modified -r .claude/reports/arch-*.md qa/reports/arch-*.md 2>/dev/null | head -3
 ```
 
 ### 1. Module structure assessment
