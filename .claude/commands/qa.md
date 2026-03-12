@@ -12,7 +12,7 @@ Run a comprehensive quality pass: build, lint, test, E2E contract tests, MCP smo
 
 ## Report convention
 
-Reports go in `.claude/reports/qa-YYYY-MM-DD.md` (gitignored). Append a `-suffix` for multiple same-day reports.
+Write to `.claude/reports/qa-YYYY-MM-DD.md` (globally gitignored via `~/.gitignore_global`). For same-day reruns, append `-v2`, `-v3`.
 
 ## Procedure
 
