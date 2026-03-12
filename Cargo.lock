@@ -506,9 +506,9 @@ dependencies = [
 
 [[package]]
 name = "graphops"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "859afa4fd6c821b924aa6f8e30686be23b3fd94a7ae291fe9df4d86dce52e678"
+checksum = "ee68533e6a18a9d5105657b97173a50afe7d3e1d944f7e303ff4b564526d10a2"
 dependencies = [
  "ordered-float",
  "petgraph",
@@ -862,7 +862,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pkgrank"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "assert_cmd",
