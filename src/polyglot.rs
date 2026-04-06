@@ -52,8 +52,8 @@ struct PolyglotRow {
 
 pub(crate) fn run_polyglot(args: &PolyglotArgs) -> Result<()> {
     let (packages, edges) = match args.ecosystem {
-        Ecosystem::Npm => parse_npm_lock(&args.path)?,
-        Ecosystem::Python => parse_uv_lock(&args.path)?,
+        Ecosystem::Npm => parse_npm(&args.path)?,
+        Ecosystem::Python => parse_python(&args.path)?,
         Ecosystem::Go => parse_go_mod_graph(&args.path)?,
         Ecosystem::Cargo => {
             return Err(anyhow!(
@@ -226,6 +226,68 @@ pub(crate) fn parse_npm_lock(path: &Path) -> ParseResult {
     Ok((packages, edges))
 }
 
+/// Try lock file first, fall back to package.json (direct deps only).
+fn parse_npm(path: &Path) -> ParseResult {
+    let dir = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent().unwrap_or(path).to_path_buf()
+    };
+    let lock = dir.join("package-lock.json");
+    if lock.exists() {
+        return parse_npm_lock(&lock);
+    }
+    let manifest = if path.is_file()
+        && path
+            .file_name()
+            .map(|f| f == "package.json")
+            .unwrap_or(false)
+    {
+        path.to_path_buf()
+    } else {
+        dir.join("package.json")
+    };
+    parse_npm_package_json(&manifest)
+}
+
+/// Parse package.json for direct dependencies only (no transitive graph).
+fn parse_npm_package_json(path: &Path) -> ParseResult {
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+
+    eprintln!(
+        "note: no package-lock.json found; using package.json (direct deps only, no transitive graph)"
+    );
+
+    let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("root");
+    let version = v.get("version").and_then(|n| n.as_str());
+
+    let mut packages = vec![DepNode {
+        name: name.to_string(),
+        version: version.map(|s| s.to_string()),
+        ecosystem: Ecosystem::Npm,
+    }];
+    let mut edges = Vec::new();
+
+    for key in ["dependencies", "devDependencies"] {
+        if let Some(deps) = v.get(key).and_then(|d| d.as_object()) {
+            for (dep_name, ver_range) in deps {
+                let ver = ver_range.as_str().map(|s| s.to_string());
+                packages.push(DepNode {
+                    name: dep_name.clone(),
+                    version: ver,
+                    ecosystem: Ecosystem::Npm,
+                });
+                edges.push((name.to_string(), dep_name.clone()));
+            }
+        }
+    }
+
+    Ok((packages, edges))
+}
+
 // ---------------------------------------------------------------------------
 // Python uv.lock
 // ---------------------------------------------------------------------------
@@ -287,6 +349,88 @@ pub(crate) fn parse_uv_lock(path: &Path) -> ParseResult {
                 version: None,
                 ecosystem: Ecosystem::Python,
             });
+        }
+    }
+
+    Ok((packages, edges))
+}
+
+/// Try uv.lock first, fall back to pyproject.toml (direct deps only).
+fn parse_python(path: &Path) -> ParseResult {
+    let dir = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent().unwrap_or(path).to_path_buf()
+    };
+    let lock = dir.join("uv.lock");
+    if lock.exists() {
+        return parse_uv_lock(&lock);
+    }
+    let manifest = if path.is_file()
+        && path
+            .file_name()
+            .map(|f| f == "pyproject.toml")
+            .unwrap_or(false)
+    {
+        path.to_path_buf()
+    } else {
+        dir.join("pyproject.toml")
+    };
+    parse_pyproject_toml(&manifest)
+}
+
+/// Parse pyproject.toml for direct dependencies only.
+fn parse_pyproject_toml(path: &Path) -> ParseResult {
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let v: toml::Value =
+        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+
+    eprintln!(
+        "note: no uv.lock found; using pyproject.toml (direct deps only, no transitive graph)"
+    );
+
+    let project_name = v
+        .get("project")
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+        .unwrap_or("root");
+    let project_version = v
+        .get("project")
+        .and_then(|p| p.get("version"))
+        .and_then(|n| n.as_str());
+
+    let mut packages = vec![DepNode {
+        name: project_name.to_string(),
+        version: project_version.map(|s| s.to_string()),
+        ecosystem: Ecosystem::Python,
+    }];
+    let mut edges = Vec::new();
+
+    // [project.dependencies] is an array of PEP 508 strings like "requests>=2.0"
+    if let Some(deps) = v
+        .get("project")
+        .and_then(|p| p.get("dependencies"))
+        .and_then(|d| d.as_array())
+    {
+        for dep in deps {
+            if let Some(spec) = dep.as_str() {
+                // Extract package name (before any version specifier).
+                let name = spec
+                    .split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
+                    .next()
+                    .unwrap_or(spec)
+                    .to_lowercase()
+                    .replace('_', "-");
+                if !name.is_empty() {
+                    packages.push(DepNode {
+                        name: name.clone(),
+                        version: None,
+                        ecosystem: Ecosystem::Python,
+                    });
+                    edges.push((project_name.to_string(), name));
+                }
+            }
         }
     }
 

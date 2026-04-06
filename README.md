@@ -24,13 +24,25 @@ Both use the same metrics (PageRank, consumer PageRank, betweenness, degree) app
 
 ```bash
 # Inter-package: rank local crates by importance (PageRank)
-cargo run -- -n 10
+pkgrank -n 10
 
 # Inter-package: rank by "who consumes this?" (Consumer PageRank)
-cargo run -- --metric consumers-pagerank -n 10
+pkgrank --metric consumers-pagerank -n 10
+
+# Blast radius: what breaks if serde changes?
+pkgrank blast-radius serde --workspace-only=false
+
+# Upgrade priority: which outdated deps matter most?
+pkgrank upgrade-priority
 
 # Intra-package: file-level coupling hotspots inside a crate
-cargo run -- modules --manifest-path ../Cargo.toml -p walk --lib -n 25
+pkgrank modules --manifest-path ../Cargo.toml -p walk --lib -n 25
+
+# Polyglot: analyze an npm project
+pkgrank polyglot --ecosystem npm path/to/project
+
+# Polyglot: analyze a Python project (uv.lock or pyproject.toml)
+pkgrank polyglot --ecosystem python path/to/project
 ```
 
 ## Graph model
@@ -84,6 +96,43 @@ Triage (artifact-backed summary, same payload as MCP `pkgrank_triage`):
 ```bash
 cargo run -- triage --root . --out evals/pkgrank
 ```
+
+## Blast radius
+
+Show everything that transitively depends on a package:
+
+```bash
+pkgrank blast-radius serde --workspace-only=false -n 20
+```
+
+Output is sorted by BFS depth (closest dependents first), then by PageRank within each depth level. Useful for answering "what breaks if I upgrade this?" before reviewing Dependabot PRs.
+
+## Upgrade priority
+
+Combine `cargo outdated` with centrality ranking to prioritize which upgrades matter most:
+
+```bash
+pkgrank upgrade-priority -n 15
+```
+
+Requires [`cargo-outdated`](https://crates.io/crates/cargo-outdated) to be installed. Scores each outdated dep by `10*ln(dependents+1) + 1000*pagerank + urgency_bonus` where urgency is major/minor/patch.
+
+## Polyglot analysis (npm, Python, Go)
+
+Analyze dependency graphs from non-Cargo ecosystems:
+
+```bash
+# npm: uses package-lock.json if available, falls back to package.json (direct deps only)
+pkgrank polyglot --ecosystem npm path/to/project
+
+# Python: uses uv.lock if available, falls back to pyproject.toml (direct deps only)
+pkgrank polyglot --ecosystem python path/to/project
+
+# Go: runs `go mod graph` in the directory (or reads a pre-captured output file)
+pkgrank polyglot --ecosystem go path/to/project
+```
+
+When only a manifest (no lock file) is available, the graph contains direct dependencies only with no transitive resolution. A note is printed to stderr.
 
 ## JSON output shape (stable wrapper)
 
@@ -183,9 +232,27 @@ Environment (optional):
 
 Tools (high level):
 
-- Default (Cursor MCP): `pkgrank_view`, `pkgrank_triage`, `pkgrank_analyze`, `pkgrank_repo_detail`, `pkgrank_crate_detail`, `pkgrank_snapshot`, `pkgrank_compare_runs`
-- Advanced (opt-in: `PKGRANK_MCP_TOOLSET=full`): `pkgrank_status`, `pkgrank_modules`, `pkgrank_modules_sweep`
+- Default (Cursor MCP): `pkgrank_view`, `pkgrank_triage`, `pkgrank_analyze`, `pkgrank_repo_detail`, `pkgrank_crate_detail`, `pkgrank_snapshot`, `pkgrank_compare_runs`, `pkgrank_blast_radius`
+- Advanced (opt-in: `PKGRANK_MCP_TOOLSET=full`): `pkgrank_status`, `pkgrank_modules`, `pkgrank_modules_sweep`, `pkgrank_upgrade_priority`, `pkgrank_polyglot`
 - Debug (opt-in: `PKGRANK_MCP_TOOLSET=debug`): internal artifact-inspection tools (e.g. TLC tables, invariants list, PPR summaries)
+
+## Analysis caching
+
+Pass `--cache` to cache analysis results under `evals/pkgrank/analysis_cache/`. Subsequent runs with the same parameters read from cache instead of re-running `cargo metadata` + graph computation:
+
+```bash
+pkgrank analyze --cache -n 10          # first run: computes + caches
+pkgrank analyze --cache -n 10          # second run: reads from cache
+pkgrank analyze --cache --cache-refresh # force recompute
+```
+
+Cache keys are derived from manifest path, workspace-only flag, dev/build dep inclusion, and feature flags.
+
+The `modules` and `modules-sweep` commands cache `cargo-modules` DOT output separately under `evals/pkgrank/modules_cache/`.
+
+## Auto-JSON when piped
+
+When stdout is not a TTY (piped to another command or redirected to a file), output defaults to JSON instead of text. This makes pkgrank composable with `jq` and other tools without requiring `--format json`.
 
 ## Configurable invariant rules
 
@@ -224,16 +291,18 @@ If no `forbidden_edges` key is present, no invariant violations are reported.
 
 ## User stories (what this is for)
 
-These are the "real" workflows this tool is meant to serve.
-
-- **Onboarding / orientation**: "What are the most central crates in this workspace? Who are the orchestrators?"
-  - Use: `pkgrank analyze` (metric `pagerank` vs `consumers-pagerank`) and `pkgrank triage`.
-- **Dependency slimming / graph sanity**: "Why is this crate so central / so sticky? What depends on it?"
-  - Use: `pkgrank analyze --metric consumers-pagerank` + drill into origins and degrees; optionally generate artifacts via `pkgrank view`.
-- **Refactor hotspots inside a crate**: "Which files/modules/items are the coupling hotspots?"
-  - Use: `pkgrank modules` with `--aggregate file` (hot files) or `--aggregate node` (hot items).
-- **Workspace sweep**: "Run that hotspot scan across a bunch of crates and summarize failures/results."
-  - Use: `pkgrank modules-sweep` (summary-only by default).
+- **Onboarding / orientation**: "What are the most central crates in this workspace?"
+  - Use: `pkgrank analyze` and `pkgrank triage`.
+- **Blast radius before upgrading**: "What breaks if I upgrade serde?"
+  - Use: `pkgrank blast-radius serde --workspace-only=false`
+- **Prioritized upgrades**: "I have 40 outdated deps; which 5 should I fix first?"
+  - Use: `pkgrank upgrade-priority -n 5`
+- **Dependency slimming**: "Why is this crate so central?"
+  - Use: `pkgrank analyze --metric consumers-pagerank`
+- **Refactor hotspots inside a crate**: "Which files are the coupling hotspots?"
+  - Use: `pkgrank modules --aggregate file`
+- **Polyglot analysis**: "Rank my npm/Python/Go deps by centrality."
+  - Use: `pkgrank polyglot --ecosystem npm .`
 - **Shareable artifacts**: "Write an HTML snapshot I can point people at."
   - Use: `pkgrank view` / `pkgrank sweep-local`.
 
