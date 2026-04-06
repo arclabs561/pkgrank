@@ -69,8 +69,10 @@ pub(crate) struct UpgradePriorityRow {
     pub upgrade_urgency: String,
 }
 
-pub(crate) fn run_upgrade_priority(args: &UpgradePriorityArgs) -> Result<()> {
-    // 1. Run cargo outdated.
+/// Compute upgrade priority rows. Returns (outdated_count, ranked_rows).
+pub(crate) fn compute_upgrade_priority(
+    args: &UpgradePriorityArgs,
+) -> Result<(usize, Vec<UpgradePriorityRow>)> {
     let outdated = run_cargo_outdated(&args.path)?;
 
     // 2. Build graph analysis.
@@ -150,11 +152,17 @@ pub(crate) fn run_upgrade_priority(args: &UpgradePriorityArgs) -> Result<()> {
     }
 
     priority_rows.sort_by(|a, b| b.priority_score.total_cmp(&a.priority_score));
+    let outdated_count = outdated.len();
     if args.top > 0 {
         priority_rows.truncate(args.top);
     }
 
-    // 4. Output.
+    Ok((outdated_count, priority_rows))
+}
+
+pub(crate) fn run_upgrade_priority(args: &UpgradePriorityArgs) -> Result<()> {
+    let (outdated_count, priority_rows) = compute_upgrade_priority(args)?;
+
     let fmt = effective_format(args.format);
     match fmt {
         OutputFormat::Json => {
@@ -170,13 +178,13 @@ pub(crate) fn run_upgrade_priority(args: &UpgradePriorityArgs) -> Result<()> {
                 schema_version: 1,
                 ok: true,
                 command: "upgrade-priority",
-                outdated_count: outdated.len(),
+                outdated_count,
                 rows: priority_rows,
             };
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
         OutputFormat::Text => {
-            println!("upgrade-priority  ({} outdated)\n", outdated.len());
+            println!("upgrade-priority  ({} outdated)\n", outdated_count);
             println!(
                 "{:>4}  {:<20} {:>10} {:>10} {:>10} {:>7} {:>8} {:>5}  pr",
                 "rank", "name", "current", "compat", "latest", "urgency", "priority", "deps"

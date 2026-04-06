@@ -6,15 +6,20 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use super::*;
+use crate::dep_graph::Ecosystem;
 
 #[derive(Parser, Debug, Clone)]
 pub(crate) struct BlastRadiusArgs {
     /// Package name to analyze (e.g. "serde").
     pub package: String,
 
-    /// Path to Cargo.toml or directory.
+    /// Path to Cargo.toml, lock file, or directory.
     #[arg(default_value = ".")]
     pub path: PathBuf,
+
+    /// Ecosystem (default: cargo).
+    #[arg(long, value_enum, default_value_t = Ecosystem::Cargo)]
+    pub ecosystem: Ecosystem,
 
     /// Include dev-dependencies (Cargo only).
     #[arg(long)]
@@ -24,7 +29,7 @@ pub(crate) struct BlastRadiusArgs {
     #[arg(long)]
     pub build: bool,
 
-    /// Restrict to workspace members only.
+    /// Restrict to workspace members only (Cargo only).
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub workspace_only: bool,
 
@@ -63,7 +68,78 @@ pub(crate) struct BlastRadiusResult {
     pub rows: Vec<BlastRadiusRow>,
 }
 
-pub(crate) fn run_blast_radius(args: &BlastRadiusArgs) -> Result<()> {
+/// Generic blast-radius BFS on any DiGraph. Returns BlastRadiusResult.
+fn blast_radius_bfs<N>(
+    graph: &DiGraph<N, f64>,
+    target_idx: NodeIndex,
+    pr: &[f64],
+    name_fn: impl Fn(NodeIndex) -> (String, String),
+    top: usize,
+) -> BlastRadiusResult
+where
+    N: Clone,
+{
+    let rev = reverse_graph(graph);
+    let mut visited = vec![false; graph.node_count()];
+    let mut depth = vec![0usize; graph.node_count()];
+    let mut queue = VecDeque::new();
+    visited[target_idx.index()] = true;
+    queue.push_back(target_idx);
+
+    while let Some(node) = queue.pop_front() {
+        for neighbor in rev.neighbors(node) {
+            if !visited[neighbor.index()] {
+                visited[neighbor.index()] = true;
+                depth[neighbor.index()] = depth[node.index()] + 1;
+                queue.push_back(neighbor);
+            }
+        }
+    }
+
+    let mut rows: Vec<BlastRadiusRow> = graph
+        .node_indices()
+        .filter(|&n| visited[n.index()] && n != target_idx)
+        .map(|n| {
+            let (name, version) = name_fn(n);
+            BlastRadiusRow {
+                name,
+                version,
+                bfs_depth: depth[n.index()],
+                pagerank: pr[n.index()],
+                in_degree: graph.neighbors_directed(n, Direction::Incoming).count(),
+                out_degree: graph.neighbors_directed(n, Direction::Outgoing).count(),
+            }
+        })
+        .collect();
+
+    rows.sort_by(|a, b| {
+        a.bfs_depth
+            .cmp(&b.bfs_depth)
+            .then_with(|| b.pagerank.total_cmp(&a.pagerank))
+    });
+
+    let total = rows.len();
+    if top > 0 {
+        rows.truncate(top);
+    }
+
+    BlastRadiusResult {
+        target: String::new(), // caller fills this
+        found: true,
+        total_transitive_dependents: total,
+        rows,
+    }
+}
+
+/// Compute blast radius for any ecosystem. Returns structured result.
+pub(crate) fn compute_blast_radius(args: &BlastRadiusArgs) -> Result<BlastRadiusResult> {
+    match args.ecosystem {
+        Ecosystem::Cargo => compute_blast_radius_cargo(args),
+        _ => compute_blast_radius_polyglot(args),
+    }
+}
+
+fn compute_blast_radius_cargo(args: &BlastRadiusArgs) -> Result<BlastRadiusResult> {
     let analyze = AnalyzeArgs {
         path: args.path.clone(),
         metric: Metric::Pagerank,
@@ -86,7 +162,6 @@ pub(crate) fn run_blast_radius(args: &BlastRadiusArgs) -> Result<()> {
         .with_context(|| format!("cargo metadata failed for {}", mpath.display()))?;
     let (graph, node_map) = build_graph(&metadata, &analyze)?;
 
-    // Build name -> NodeIndex lookup.
     let pkg_by_id: std::collections::HashMap<&cargo_metadata::PackageId, &cargo_metadata::Package> =
         metadata.packages.iter().map(|p| (&p.id, p)).collect();
 
@@ -101,75 +176,70 @@ pub(crate) fn run_blast_radius(args: &BlastRadiusArgs) -> Result<()> {
         .map(|(_, &idx)| idx);
 
     let Some(target_idx) = target_idx else {
-        let result = BlastRadiusResult {
+        return Ok(BlastRadiusResult {
             target: args.package.clone(),
             found: false,
             total_transitive_dependents: 0,
             rows: Vec::new(),
-        };
-        return print_blast_radius(&result, args);
+        });
     };
 
-    // Compute PageRank for annotation.
     let pr = pagerank_auto(&graph);
-
-    // Reverse-BFS from target to find all transitive dependents.
-    let rev = reverse_graph(&graph);
-    let mut visited = vec![false; graph.node_count()];
-    let mut depth = vec![0usize; graph.node_count()];
-    let mut queue = VecDeque::new();
-    visited[target_idx.index()] = true;
-    queue.push_back(target_idx);
-
-    while let Some(node) = queue.pop_front() {
-        for neighbor in rev.neighbors(node) {
-            if !visited[neighbor.index()] {
-                visited[neighbor.index()] = true;
-                depth[neighbor.index()] = depth[node.index()] + 1;
-                queue.push_back(neighbor);
-            }
-        }
-    }
-
-    // Collect all visited nodes except the target itself.
-    let mut rows: Vec<BlastRadiusRow> = graph
-        .node_indices()
-        .filter(|&n| visited[n.index()] && n != target_idx)
-        .map(|n| {
-            let id = graph.node_weight(n).expect("valid index");
+    let mut result = blast_radius_bfs(
+        &graph,
+        target_idx,
+        &pr,
+        |n| {
+            let id = graph.node_weight(n).expect("valid");
             let pkg = pkg_by_id.get(id);
-            let name = pkg.map(|p| p.name.as_str()).unwrap_or("?").to_string();
-            let version = pkg.map(|p| p.version.to_string()).unwrap_or_default();
-            BlastRadiusRow {
-                name,
-                version,
-                bfs_depth: depth[n.index()],
-                pagerank: pr[n.index()],
-                in_degree: graph.neighbors_directed(n, Direction::Incoming).count(),
-                out_degree: graph.neighbors_directed(n, Direction::Outgoing).count(),
-            }
-        })
-        .collect();
+            (
+                pkg.map(|p| p.name.as_str()).unwrap_or("?").to_string(),
+                pkg.map(|p| p.version.to_string()).unwrap_or_default(),
+            )
+        },
+        args.top,
+    );
+    result.target = args.package.clone();
+    Ok(result)
+}
 
-    // Sort by depth ASC, then pagerank DESC within depth.
-    rows.sort_by(|a, b| {
-        a.bfs_depth
-            .cmp(&b.bfs_depth)
-            .then_with(|| b.pagerank.total_cmp(&a.pagerank))
-    });
-
-    let total = rows.len();
-    if args.top > 0 {
-        rows.truncate(args.top);
-    }
-
-    let result = BlastRadiusResult {
-        target: args.package.clone(),
-        found: true,
-        total_transitive_dependents: total,
-        rows,
+fn compute_blast_radius_polyglot(args: &BlastRadiusArgs) -> Result<BlastRadiusResult> {
+    let (packages, edges) = match args.ecosystem {
+        Ecosystem::Npm => crate::polyglot::parse_npm(&args.path)?,
+        Ecosystem::Python => crate::polyglot::parse_python(&args.path)?,
+        Ecosystem::Go => crate::polyglot::parse_go_mod_graph(&args.path)?,
+        Ecosystem::Cargo => unreachable!(),
     };
 
+    let (graph, map) = dep_graph::build_dep_graph(&packages, &edges);
+
+    let target_idx = map.get(&args.package).copied();
+    let Some(target_idx) = target_idx else {
+        return Ok(BlastRadiusResult {
+            target: args.package.clone(),
+            found: false,
+            total_transitive_dependents: 0,
+            rows: Vec::new(),
+        });
+    };
+
+    let pr = pagerank_auto(&graph);
+    let mut result = blast_radius_bfs(
+        &graph,
+        target_idx,
+        &pr,
+        |n| {
+            let node = graph.node_weight(n).expect("valid");
+            (node.name.clone(), node.version.clone().unwrap_or_default())
+        },
+        args.top,
+    );
+    result.target = args.package.clone();
+    Ok(result)
+}
+
+pub(crate) fn run_blast_radius(args: &BlastRadiusArgs) -> Result<()> {
+    let result = compute_blast_radius(args)?;
     print_blast_radius(&result, args)
 }
 

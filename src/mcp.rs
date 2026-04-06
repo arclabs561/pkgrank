@@ -1357,6 +1357,7 @@ impl PkgrankStdioMcpFull {
         let args = BlastRadiusArgs {
             package: params.0.package.clone(),
             path: PathBuf::from(params.0.path.as_deref().unwrap_or(".")),
+            ecosystem: dep_graph::Ecosystem::Cargo,
             dev: params.0.dev.unwrap_or(false),
             build: params.0.build.unwrap_or(false),
             workspace_only: params.0.workspace_only.unwrap_or(true),
@@ -1365,111 +1366,11 @@ impl PkgrankStdioMcpFull {
             cache: false,
             cache_refresh: false,
         };
-        // Build the blast-radius result directly (no stdout capture needed).
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // Run analysis and build result directly.
-            let analyze = AnalyzeArgs {
-                path: args.path.clone(),
-                metric: Metric::Pagerank,
-                top: 0,
-                dev: args.dev,
-                build: args.build,
-                workspace_only: args.workspace_only,
-                all_features: false,
-                no_default_features: false,
-                features: None,
-                format: OutputFormat::Json,
-                stats: false,
-                json_limit: None,
-                cache: false,
-                cache_refresh: false,
-            };
-            let mpath = manifest_path(&analyze.path)?;
-            let metadata = metadata_for(&mpath, &analyze)?;
-            let (graph, node_map) = build_graph(&metadata, &analyze)?;
-            let pkg_by_id: std::collections::HashMap<
-                &cargo_metadata::PackageId,
-                &cargo_metadata::Package,
-            > = metadata.packages.iter().map(|p| (&p.id, p)).collect();
-
-            // Find target.
-            let target_idx = node_map
-                .iter()
-                .find(|(id, _)| {
-                    pkg_by_id
-                        .get(id)
-                        .map(|p| p.name.as_ref() == args.package.as_str())
-                        .unwrap_or(false)
-                })
-                .map(|(_, &idx)| idx);
-
-            let pr = pagerank_auto(&graph);
-
-            let payload = if let Some(tidx) = target_idx {
-                let rev = reverse_graph(&graph);
-                let mut visited = vec![false; graph.node_count()];
-                let mut depth = vec![0usize; graph.node_count()];
-                let mut queue = std::collections::VecDeque::new();
-                visited[tidx.index()] = true;
-                queue.push_back(tidx);
-                while let Some(node) = queue.pop_front() {
-                    for neighbor in rev.neighbors(node) {
-                        if !visited[neighbor.index()] {
-                            visited[neighbor.index()] = true;
-                            depth[neighbor.index()] = depth[node.index()] + 1;
-                            queue.push_back(neighbor);
-                        }
-                    }
-                }
-                let mut rows: Vec<serde_json::Value> = graph
-                    .node_indices()
-                    .filter(|&n| visited[n.index()] && n != tidx)
-                    .map(|n| {
-                        let id = graph.node_weight(n).expect("valid");
-                        let pkg = pkg_by_id.get(id);
-                        serde_json::json!({
-                            "name": pkg.map(|p| p.name.as_ref()).unwrap_or("?"),
-                            "version": pkg.map(|p| p.version.to_string()).unwrap_or_default(),
-                            "bfs_depth": depth[n.index()],
-                            "pagerank": pr[n.index()],
-                        })
-                    })
-                    .collect();
-                rows.sort_by(|a, b| {
-                    let da = a["bfs_depth"].as_u64().unwrap_or(0);
-                    let db = b["bfs_depth"].as_u64().unwrap_or(0);
-                    da.cmp(&db).then_with(|| {
-                        let pa = b["pagerank"].as_f64().unwrap_or(0.0);
-                        let pb = a["pagerank"].as_f64().unwrap_or(0.0);
-                        pa.total_cmp(&pb)
-                    })
-                });
-                let total = rows.len();
-                rows.truncate(args.top);
-                serde_json::json!({
-                    "target": args.package,
-                    "found": true,
-                    "total_transitive_dependents": total,
-                    "rows": rows,
-                })
-            } else {
-                serde_json::json!({
-                    "target": args.package,
-                    "found": false,
-                    "total_transitive_dependents": 0,
-                    "rows": [],
-                })
-            };
-            Ok::<serde_json::Value, anyhow::Error>(payload)
-        }));
-        match result {
-            Ok(Ok(payload)) => mcp_ok("pkgrank_blast_radius", payload, None),
-            Ok(Err(e)) => Err(McpError::internal_error(format!("{:#}", e), None)),
-            Err(_) => Err(McpError::internal_error(
-                "blast-radius panicked".to_string(),
-                None,
-            )),
-        }
+        let result = compute_blast_radius(&args)
+            .map_err(|e| McpError::internal_error(format!("{:#}", e), None))?;
+        let payload = serde_json::to_value(&result)
+            .map_err(|e| McpError::internal_error(format!("{:#}", e), None))?;
+        mcp_ok("pkgrank_blast_radius", payload, None)
     }
 
     #[tool(description = "Combine cargo outdated with centrality ranking to prioritize upgrades")]
@@ -1487,16 +1388,13 @@ impl PkgrankStdioMcpFull {
             cache: false,
             cache_refresh: false,
         };
-        // Run the CLI function and capture its JSON output.
-        run_upgrade_priority(&args)
+        let (outdated_count, rows) = compute_upgrade_priority(&args)
             .map_err(|e| McpError::internal_error(format!("{:#}", e), None))?;
-        // The function prints to stdout; for MCP we need to intercept.
-        // For now, return a simple acknowledgment.
-        mcp_ok(
-            "pkgrank_upgrade_priority",
-            serde_json::json!({"note": "output printed to stdout; use CLI for full results"}),
-            None,
-        )
+        let payload = serde_json::json!({
+            "outdated_count": outdated_count,
+            "rows": rows,
+        });
+        mcp_ok("pkgrank_upgrade_priority", payload, None)
     }
 
     #[tool(
@@ -1524,19 +1422,19 @@ impl PkgrankStdioMcpFull {
             .map(parse_metric)
             .transpose()?
             .unwrap_or(Metric::Pagerank);
-        let args = PolyglotArgs {
-            ecosystem,
-            path: PathBuf::from(params.0.path.as_deref().unwrap_or(".")),
-            metric,
-            top: params.0.top.unwrap_or(25),
-            format: OutputFormat::Json,
-        };
-        run_polyglot(&args).map_err(|e| McpError::internal_error(format!("{:#}", e), None))?;
-        mcp_ok(
-            "pkgrank_polyglot",
-            serde_json::json!({"note": "output printed to stdout; use CLI for full results"}),
-            None,
-        )
+        let top = params.0.top.unwrap_or(25);
+        let path = PathBuf::from(params.0.path.as_deref().unwrap_or("."));
+        let (_graph, _map, rows) = polyglot_analyze(ecosystem, &path, metric)
+            .map_err(|e| McpError::internal_error(format!("{:#}", e), None))?;
+        let rows_total = rows.len();
+        let rows: Vec<_> = rows.into_iter().take(top).collect();
+        let payload = serde_json::json!({
+            "ecosystem": ecosystem,
+            "rows_total": rows_total,
+            "rows_returned": rows.len(),
+            "rows": rows,
+        });
+        mcp_ok("pkgrank_polyglot", payload, None)
     }
 }
 

@@ -39,7 +39,7 @@ pub(crate) struct PolyglotArgs {
 }
 
 #[derive(Debug, Serialize)]
-struct PolyglotRow {
+pub(crate) struct PolyglotRow {
     name: String,
     version: Option<String>,
     ecosystem: Ecosystem,
@@ -50,11 +50,16 @@ struct PolyglotRow {
     betweenness: f64,
 }
 
-pub(crate) fn run_polyglot(args: &PolyglotArgs) -> Result<()> {
-    let (packages, edges) = match args.ecosystem {
-        Ecosystem::Npm => parse_npm(&args.path)?,
-        Ecosystem::Python => parse_python(&args.path)?,
-        Ecosystem::Go => parse_go_mod_graph(&args.path)?,
+/// Load and rank a polyglot dependency graph. Returns the graph + ranked rows.
+pub(crate) fn polyglot_analyze(
+    ecosystem: Ecosystem,
+    path: &Path,
+    metric: Metric,
+) -> Result<(dep_graph::DepGraph, dep_graph::DepNodeMap, Vec<PolyglotRow>)> {
+    let (packages, edges) = match ecosystem {
+        Ecosystem::Npm => parse_npm(path)?,
+        Ecosystem::Python => parse_python(path)?,
+        Ecosystem::Go => parse_go_mod_graph(path)?,
         Ecosystem::Cargo => {
             return Err(anyhow!(
                 "Use `pkgrank analyze` for Cargo workspaces. The `polyglot` command is for npm, python, and go."
@@ -62,7 +67,7 @@ pub(crate) fn run_polyglot(args: &PolyglotArgs) -> Result<()> {
         }
     };
 
-    let (graph, _map) = build_dep_graph(&packages, &edges);
+    let (graph, map) = build_dep_graph(&packages, &edges);
     let pr = pagerank_auto(&graph);
     let rev = reverse_graph(&graph);
     let consumers_pr = pagerank_auto(&rev);
@@ -85,13 +90,19 @@ pub(crate) fn run_polyglot(args: &PolyglotArgs) -> Result<()> {
         })
         .collect();
 
-    rows.sort_by(|a, b| match args.metric {
+    rows.sort_by(|a, b| match metric {
         Metric::Pagerank => b.pagerank.total_cmp(&a.pagerank),
         Metric::ConsumersPagerank => b.consumers_pagerank.total_cmp(&a.consumers_pagerank),
         Metric::Betweenness => b.betweenness.total_cmp(&a.betweenness),
         Metric::Indegree => b.in_degree.cmp(&a.in_degree),
         Metric::Outdegree => b.out_degree.cmp(&a.out_degree),
     });
+
+    Ok((graph, map, rows))
+}
+
+pub(crate) fn run_polyglot(args: &PolyglotArgs) -> Result<()> {
+    let (graph, _map, rows) = polyglot_analyze(args.ecosystem, &args.path, args.metric)?;
 
     let fmt = effective_format(args.format);
     match fmt {
@@ -227,7 +238,7 @@ pub(crate) fn parse_npm_lock(path: &Path) -> ParseResult {
 }
 
 /// Try lock file first, fall back to package.json (direct deps only).
-fn parse_npm(path: &Path) -> ParseResult {
+pub(crate) fn parse_npm(path: &Path) -> ParseResult {
     let dir = if path.is_dir() {
         path.to_path_buf()
     } else {
@@ -356,7 +367,7 @@ pub(crate) fn parse_uv_lock(path: &Path) -> ParseResult {
 }
 
 /// Try uv.lock first, fall back to pyproject.toml (direct deps only).
-fn parse_python(path: &Path) -> ParseResult {
+pub(crate) fn parse_python(path: &Path) -> ParseResult {
     let dir = if path.is_dir() {
         path.to_path_buf()
     } else {
