@@ -1179,6 +1179,8 @@ impl PkgrankStdioMcpFull {
             format: OutputFormat::Json,
             stats: false,
             json_limit: None,
+            cache: false,
+            cache_refresh: false,
         };
         let (rows, convergence) = analyze_rows_with_convergence(&analyze)
             .map_err(|e| McpError::internal_error(format!("{:#}", e), None))?;

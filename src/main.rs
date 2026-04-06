@@ -95,6 +95,12 @@ enum Command {
     ///
     /// This is the same “triage” payload as the MCP tool `pkgrank_triage`, but usable from CLI.
     Triage(TriageCliArgs),
+    /// Show everything that transitively depends on a package.
+    BlastRadius(BlastRadiusArgs),
+    /// Combine cargo outdated with centrality ranking to prioritize upgrades.
+    UpgradePriority(UpgradePriorityArgs),
+    /// Analyze a non-Cargo lock file (npm, Python uv.lock, Go go.mod).
+    Polyglot(PolyglotArgs),
     /// Serve as an MCP stdio server (for Cursor).
     McpStdio,
 }
@@ -839,6 +845,9 @@ fn main() -> Result<()> {
         Some(Command::ModulesSweep(args)) => ("modules-sweep", run_modules_sweep(&args)),
         Some(Command::View(args)) => ("view", run_view(&args)),
         Some(Command::Triage(args)) => ("triage", run_triage(&args)),
+        Some(Command::BlastRadius(args)) => ("blast-radius", run_blast_radius(&args)),
+        Some(Command::UpgradePriority(args)) => ("upgrade-priority", run_upgrade_priority(&args)),
+        Some(Command::Polyglot(args)) => ("polyglot", run_polyglot(&args)),
         Some(Command::McpStdio) => ("mcp-stdio", run_mcp_stdio()),
     };
 
@@ -866,8 +875,9 @@ fn run_analyze(args: &AnalyzeArgs) -> Result<()> {
     let dt_score = t_score.elapsed();
 
     let mut bytes_printed: Option<u64> = None;
+    let fmt = effective_format(args.format);
 
-    match args.format {
+    match fmt {
         OutputFormat::Json => {
             #[derive(Serialize)]
             struct AnalyzeJsonOut<'a> {
@@ -1029,14 +1039,14 @@ fn run_mcp_stdio() -> Result<()> {
     }
 }
 
-fn manifest_path(path: &Path) -> Result<PathBuf> {
+pub(crate) fn manifest_path(path: &Path) -> Result<PathBuf> {
     if path.is_file() {
         return Ok(path.to_path_buf());
     }
     Ok(path.join("Cargo.toml"))
 }
 
-fn metadata_for(manifest_path: &PathBuf, args: &AnalyzeArgs) -> Result<Metadata> {
+pub(crate) fn metadata_for(manifest_path: &PathBuf, args: &AnalyzeArgs) -> Result<Metadata> {
     let mut cmd = MetadataCommand::new();
     cmd.manifest_path(manifest_path);
 
@@ -1094,7 +1104,7 @@ fn metadata_for(manifest_path: &PathBuf, args: &AnalyzeArgs) -> Result<Metadata>
     }
 }
 
-fn build_graph(
+pub(crate) fn build_graph(
     metadata: &Metadata,
     args: &AnalyzeArgs,
 ) -> Result<(DiGraph<PackageId, f64>, HashMap<PackageId, NodeIndex>)> {
@@ -1600,6 +1610,8 @@ fn compute_tlc_crates(root: &Path, out_dir: &Path) -> Result<Vec<TlcCrateRow>> {
         format: OutputFormat::Json,
         stats: false,
         json_limit: None,
+        cache: false,
+        cache_refresh: false,
     };
     let manifest = manifest_path(&analyze.path)?;
     let metadata = metadata_for(&manifest, &analyze)?;
@@ -1965,6 +1977,8 @@ fn compute_repo_graph_from_live_metadata(
         format: OutputFormat::Json,
         stats: false,
         json_limit: None,
+        cache: false,
+        cache_refresh: false,
     };
     let manifest_path = manifest_path(&analyze.path)?;
     let metadata = metadata_for(&manifest_path, &analyze)?;
@@ -2345,6 +2359,8 @@ fn write_recent_files_artifacts(
         format: OutputFormat::Json,
         stats: false,
         json_limit: None,
+        cache: false,
+        cache_refresh: false,
     };
     let rows = analyze_rows(&analyze).unwrap_or_default();
     let mut crate_roots: Vec<(PathBuf, String, String)> = rows
@@ -2555,6 +2571,8 @@ fn run_sweep_local(args: &SweepLocalArgs) -> Result<()> {
                 format: OutputFormat::Json,
                 stats: false,
                 json_limit: None,
+                cache: false,
+                cache_refresh: false,
             };
             let rows = analyze_rows(&analyze)?;
 
@@ -2665,6 +2683,8 @@ fn run_sweep_local(args: &SweepLocalArgs) -> Result<()> {
                     format: OutputFormat::Json,
                     stats: false,
                     json_limit: None,
+                    cache: false,
+                    cache_refresh: false,
                 };
 
                 match analyze_rows(&analyze) {
@@ -2728,10 +2748,53 @@ fn analyze_rows(args: &AnalyzeArgs) -> Result<Vec<Row>> {
     compute_rows(&metadata, &graph, &nodes)
 }
 
-fn analyze_rows_with_convergence(args: &AnalyzeArgs) -> Result<(Vec<Row>, serde_json::Value)> {
-    let manifest_path = manifest_path(&args.path)?;
-    let metadata = metadata_for(&manifest_path, args)
-        .with_context(|| format!("cargo metadata failed for {}", manifest_path.display()))?;
+pub(crate) fn analyze_rows_with_convergence(
+    args: &AnalyzeArgs,
+) -> Result<(Vec<Row>, serde_json::Value)> {
+    let mpath = manifest_path(&args.path)?;
+
+    if args.cache {
+        let cache_root = args.path.join("evals/pkgrank/analysis_cache");
+        let key = analysis_cache_key(
+            &mpath,
+            args.workspace_only,
+            args.dev,
+            args.build,
+            args.all_features,
+            args.no_default_features,
+            args.features.as_deref(),
+        );
+        if !args.cache_refresh {
+            if let Some(entry) = analysis_cache_read(&cache_root, key) {
+                let mut rows = entry.rows;
+                sort_rows_by_metric(&mut rows, args.metric);
+                return Ok((rows, entry.convergence));
+            }
+        }
+        let (rows, convergence) = analyze_uncached(&mpath, args)?;
+        let entry = AnalysisCacheEntry {
+            schema_version: 1,
+            rows: rows.clone(),
+            convergence: convergence.clone(),
+        };
+        analysis_cache_write(
+            &cache_root,
+            key,
+            &entry,
+            &mpath,
+            args.workspace_only,
+            args.dev,
+            args.build,
+        );
+        return Ok((rows, convergence));
+    }
+
+    analyze_uncached(&mpath, args)
+}
+
+fn analyze_uncached(mpath: &PathBuf, args: &AnalyzeArgs) -> Result<(Vec<Row>, serde_json::Value)> {
+    let metadata = metadata_for(mpath, args)
+        .with_context(|| format!("cargo metadata failed for {}", mpath.display()))?;
     let (graph, _nodes) = build_graph(&metadata, args)?;
     let (mut rows, convergence) = compute_rows_with_convergence(&metadata, &graph)?;
     sort_rows_by_metric(&mut rows, args.metric);
@@ -3213,6 +3276,8 @@ fn run_cratesio(args: &CratesIoArgs) -> Result<()> {
             format: OutputFormat::Json,
             stats: false,
             json_limit: None,
+            cache: false,
+            cache_refresh: false,
         };
         let rows = analyze_rows(&analyze)?;
         let mut uniq = HashSet::new();
@@ -3475,6 +3540,8 @@ fn run_view(args: &ViewArgs) -> Result<()> {
             format: OutputFormat::Json,
             stats: false,
             json_limit: None,
+            cache: false,
+            cache_refresh: false,
         };
         Some(analyze_rows(&analyze)?)
     } else {

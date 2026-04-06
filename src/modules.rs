@@ -1125,14 +1125,7 @@ fn run_cargo_modules_dot(cmd: &ProcessCommand) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for &b in bytes {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
-}
+// fnv1a64 is now in dep_graph.rs (imported via `use super::*`).
 
 fn print_modules_text(
     args: &ModulesArgs,
