@@ -1,8 +1,7 @@
 # Managed by repository-settings/app
 # https://github.com/repository-settings/app
-
 repository:
-  description: "Cargo dependency graph centrality analysis (workspace tool)"
+  description: "Dependency graph centrality analysis"
   homepage: "https://github.com/arclabs561/pkgrank"
   private: false
   has_issues: true
@@ -13,7 +12,6 @@ repository:
   allow_merge_commit: true
   allow_rebase_merge: true
   delete_branch_on_merge: true
-
   topics:
     - cargo
     - dependency-graph

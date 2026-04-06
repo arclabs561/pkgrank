@@ -26,6 +26,21 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 mod modules;
 pub(crate) use modules::*;
 
+mod dep_graph;
+pub(crate) use dep_graph::*;
+
+mod analysis_cache;
+pub(crate) use analysis_cache::*;
+
+mod blast_radius;
+pub(crate) use blast_radius::*;
+
+mod polyglot;
+pub(crate) use polyglot::*;
+
+mod upgrade_priority;
+pub(crate) use upgrade_priority::*;
+
 #[cfg(feature = "stdio")]
 mod mcp;
 #[cfg(feature = "stdio")]
@@ -84,7 +99,7 @@ enum Command {
     McpStdio,
 }
 
-fn pagerank_auto<N>(graph: &DiGraph<N, f64>) -> Vec<f64> {
+pub(crate) fn pagerank_auto<N>(graph: &DiGraph<N, f64>) -> Vec<f64> {
     // In pkgrank, many graphs use "all weights == 1.0" to mean unweighted. Prefer the unweighted
     // implementation in that case, but fall back to weighted PageRank when any edge has a non-unit
     // weight.
@@ -123,7 +138,7 @@ fn pagerank_auto_run<N>(graph: &DiGraph<N, f64>) -> PageRankRun {
     }
 }
 
-fn reverse_graph<N: Clone>(graph: &DiGraph<N, f64>) -> DiGraph<N, f64> {
+pub(crate) fn reverse_graph<N: Clone>(graph: &DiGraph<N, f64>) -> DiGraph<N, f64> {
     // Reverse a graph while preserving node order (so NodeIndex::index() aligns).
     let mut rev: DiGraph<N, f64> = DiGraph::new();
     let mut idx_map: Vec<NodeIndex> = Vec::with_capacity(graph.node_count());
@@ -140,7 +155,7 @@ fn reverse_graph<N: Clone>(graph: &DiGraph<N, f64>) -> DiGraph<N, f64> {
 }
 
 #[derive(Parser, Debug, Clone)]
-struct AnalyzeArgs {
+pub(crate) struct AnalyzeArgs {
     /// Path to a `Cargo.toml`, or a directory containing one.
     #[arg(default_value = ".")]
     path: PathBuf,
@@ -205,10 +220,28 @@ struct AnalyzeArgs {
     /// surprising existing scripts that pass `-n` while consuming JSON.
     #[arg(long)]
     json_limit: Option<usize>,
+
+    /// Cache analysis results under evals/pkgrank/analysis_cache/.
+    #[arg(long, default_value_t = false)]
+    cache: bool,
+
+    /// Force-refresh cached analysis result.
+    #[arg(long, default_value_t = false)]
+    cache_refresh: bool,
+}
+
+/// Returns Json when the explicit format is Text but stdout is not a TTY (piped).
+pub(crate) fn effective_format(explicit: OutputFormat) -> OutputFormat {
+    use std::io::IsTerminal;
+    if explicit == OutputFormat::Text && !std::io::stdout().is_terminal() {
+        OutputFormat::Json
+    } else {
+        explicit
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
-enum Metric {
+pub(crate) enum Metric {
     Pagerank,
     /// PageRank on the reversed graph (“who is an orchestrator / top-level consumer?”).
     ConsumersPagerank,
@@ -217,8 +250,8 @@ enum Metric {
     Betweenness,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum OutputFormat {
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub(crate) enum OutputFormat {
     Text,
     Json,
 }
@@ -454,7 +487,7 @@ enum PackageOrigin {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Row {
+pub(crate) struct Row {
     id: String,
     name: String,
     version: String,
@@ -1422,6 +1455,37 @@ struct RepoInvariantViolation {
     weight: usize,
 }
 
+/// A forbidden cross-axis dependency rule, loaded from `dev_repos_overview.json`.
+#[derive(Debug, Clone, Deserialize)]
+struct ForbiddenEdgeRule {
+    #[serde(rename = "from")]
+    from_axis: String,
+    #[serde(rename = "to")]
+    to_axis: String,
+}
+
+/// Load forbidden edge rules from an overview JSON file.
+///
+/// Expected format: `{ "forbidden_edges": [{ "from": "x", "to": "y" }, ...] }`
+///
+/// Returns an empty vec if the file does not exist or has no rules.
+fn load_forbidden_edge_rules(overview_path: &Path) -> Vec<ForbiddenEdgeRule> {
+    let raw = match fs::read_to_string(overview_path) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let v: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let Some(arr) = v.get("forbidden_edges").and_then(|a| a.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|item| serde_json::from_value::<ForbiddenEdgeRule>(item.clone()).ok())
+        .collect()
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct TlcRepoRow {
     repo: String,
@@ -2091,12 +2155,9 @@ fn compute_repo_graph_from_live_metadata(
 
     // Invariants / forbidden cross-axis edges (repo-level).
     //
-    // These are workspace-level “shape constraints”, not Rust type constraints:
-    // - Tekne should not depend on Agents or Governance.
-    // - Governance should not depend on Agents.
-    //
-    // (Agents depending on Tekne is fine; Agents depending on Governance can be OK,
-    // but it’s still worth surfacing separately later.)
+    // Rules are loaded from dev_repos_overview.json under “forbidden_edges”.
+    // If no rules are configured, no violations are reported.
+    let forbidden_rules = load_forbidden_edge_rules(&default_overview_path(root));
     let mut violations: Vec<RepoInvariantViolation> = Vec::new();
     for ((a, b), w) in &edge_w {
         let ax = axis_by_repo
@@ -2108,29 +2169,18 @@ fn compute_repo_graph_from_live_metadata(
             .cloned()
             .unwrap_or_else(|| "other".to_string());
 
-        let tekne_forbidden = ax == "tekne" && (bx == "agents" || bx == "governance");
-        let governance_forbidden = ax == "governance" && bx == "agents";
-
-        if tekne_forbidden {
-            violations.push(RepoInvariantViolation {
-                rule: "tekne_must_not_depend_on_agents_or_governance".to_string(),
-                from_repo: a.clone(),
-                from_axis: ax.clone(),
-                to_repo: b.clone(),
-                to_axis: bx.clone(),
-                weight: *w,
-            });
-        }
-
-        if governance_forbidden {
-            violations.push(RepoInvariantViolation {
-                rule: "governance_must_not_depend_on_agents".to_string(),
-                from_repo: a.clone(),
-                from_axis: ax,
-                to_repo: b.clone(),
-                to_axis: bx,
-                weight: *w,
-            });
+        for rule in &forbidden_rules {
+            if ax == rule.from_axis && bx == rule.to_axis {
+                let rule_name = format!("{}_must_not_depend_on_{}", rule.from_axis, rule.to_axis);
+                violations.push(RepoInvariantViolation {
+                    rule: rule_name,
+                    from_repo: a.clone(),
+                    from_axis: ax.clone(),
+                    to_repo: b.clone(),
+                    to_axis: bx.clone(),
+                    weight: *w,
+                });
+            }
         }
     }
     violations.sort_by(|a, b| b.weight.cmp(&a.weight));
@@ -3757,10 +3807,20 @@ fn run_view(args: &ViewArgs) -> Result<()> {
                     if let Ok(raw) = fs::read_to_string(&inv_path) {
                         if let Ok(v) = serde_json::from_str::<Vec<RepoInvariantViolation>>(&raw) {
                             html.push_str("<h2>Invariants: forbidden cross-axis edges</h2>");
-                            html.push_str("<p>Rules enforced here:</p><ul>");
-                            html.push_str("<li><code>tekne → agents</code> and <code>tekne → governance</code> forbidden</li>");
-                            html.push_str("<li><code>governance → agents</code> forbidden</li>");
-                            html.push_str("</ul>");
+                            let mut seen_rules: Vec<String> =
+                                v.iter().map(|r| r.rule.clone()).collect();
+                            seen_rules.sort();
+                            seen_rules.dedup();
+                            if !seen_rules.is_empty() {
+                                html.push_str("<p>Rules violated:</p><ul>");
+                                for rule in &seen_rules {
+                                    html.push_str(&format!(
+                                        "<li><code>{}</code></li>",
+                                        html_escape(rule)
+                                    ));
+                                }
+                                html.push_str("</ul>");
+                            }
                             html.push_str(&format!("<p>Violations: <code>{}</code></p>", v.len()));
 
                             if !v.is_empty() {
@@ -4448,12 +4508,13 @@ fn infer_repo_for_manifest(root: &Path, manifest_path: &str) -> String {
         .map(|c| c.as_os_str().to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    // Treat `_mcp/*` crates as their own repos.
-    if first == "_mcp" {
+    // Treat `_<prefix>/*` directories as umbrella dirs: use the second path
+    // component as the repo name (e.g. `_mcp/axum-mcp` -> `axum-mcp`).
+    if first.starts_with('_') {
         if let Some(second) = it.next() {
             return second.as_os_str().to_string_lossy().to_string();
         }
-        return "mcp".to_string();
+        return first.trim_start_matches('_').to_string();
     }
 
     first
@@ -4532,12 +4593,7 @@ fn render_repo_scatter_svg(rows: &[RepoRow]) -> String {
         } else {
             3.0 + 9.0 * ((r.third_party_deps as f64) / (max_3p as f64)).sqrt()
         };
-        let color = match r.axis.as_str() {
-            "tekne" => "#2b6cb0",
-            "agents" => "#c05621",
-            "governance" => "#2f855a",
-            _ => "#555555",
-        };
+        let color = axis_color(&r.axis);
         // Minimal tooltip via <title>
         out.push_str(&format!(
             "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"{:.2}\" fill=\"{}\" fill-opacity=\"0.55\" stroke=\"#333\" stroke-opacity=\"0.2\"><title>{}</title></circle>\n",
@@ -4558,4 +4614,22 @@ fn render_repo_scatter_svg(rows: &[RepoRow]) -> String {
 
     out.push_str("</svg>\n");
     out
+}
+
+/// Deterministic color for an axis name. Uses a small distinguishable palette
+/// indexed by FNV-1a hash, so any axis name gets a stable color.
+fn axis_color(axis: &str) -> &'static str {
+    const PALETTE: &[&str] = &[
+        "#2b6cb0", "#c05621", "#2f855a", "#9b2c2c", "#6b46c1", "#b7791f", "#2c7a7b", "#702459",
+        "#4a5568", "#3182ce",
+    ];
+    if axis == "other" || axis.is_empty() {
+        return "#555555";
+    }
+    let mut h: u32 = 0x811c9dc5;
+    for b in axis.bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(0x01000193);
+    }
+    PALETTE[(h as usize) % PALETTE.len()]
 }

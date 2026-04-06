@@ -1,6 +1,8 @@
 # pkgrank
 
-`pkgrank` ranks nodes in a Cargo dependency graph using centrality metrics.
+`pkgrank` ranks nodes in a dependency graph using centrality metrics.
+
+Currently supports Cargo workspaces; designed to extend to other ecosystems (npm, PyPI, Go modules).
 
 ## Install
 
@@ -9,14 +11,26 @@ cargo install pkgrank
 pkgrank --help
 ```
 
+## Two axes of analysis
+
+pkgrank answers two structurally different questions:
+
+- **Inter-package centrality** (`analyze`, `sweep-local`, `triage`, `cratesio`): which packages in a workspace are most central, most depended-on, most risky to change?
+- **Intra-package centrality** (`modules`, `modules-sweep`): which files, modules, or items *inside* a package are the coupling hotspots?
+
+Both use the same metrics (PageRank, consumer PageRank, betweenness, degree) applied to different graphs.
+
 ## TL;DR
 
 ```bash
-# Rank local crates by importance (PageRank)
+# Inter-package: rank local crates by importance (PageRank)
 cargo run -- -n 10
 
-# Rank by "who consumes this?" (Consumer PageRank)
+# Inter-package: rank by "who consumes this?" (Consumer PageRank)
 cargo run -- --metric consumers-pagerank -n 10
+
+# Intra-package: file-level coupling hotspots inside a crate
+cargo run -- modules --manifest-path ../Cargo.toml -p walk --lib -n 25
 ```
 
 ## Graph model
@@ -26,10 +40,20 @@ cargo run -- --metric consumers-pagerank -n 10
 
 ## Interpretation
 
-- PageRank on the depends-on graph tends to surface **shared dependencies / “substrate” crates**.
-- To surface **top-level orchestrators / consumers**, use the “consumer PageRank” (PageRank on the reversed graph).
+- PageRank on the depends-on graph tends to surface **shared dependencies / "substrate" crates**.
+- To surface **top-level orchestrators / consumers**, use the "consumer PageRank" (PageRank on the reversed graph).
 
-## Usage (local crate graph)
+## Scoring: TLC (Top-Level Cost)
+
+The `triage` and `view` commands produce a **TLC score** for each crate and repo. TLC is a composite heuristic that combines:
+
+- **Blast radius**: `10 * ln(transitive_dependents + 1)` -- how many things break if this changes
+- **Centrality**: `1000 * pagerank` -- structural importance in the dependency graph
+- **Boundary complexity**: number of third-party dependencies -- surface area exposed to external changes
+
+Higher TLC = more structurally important and/or more exposed. It is a triage signal, not a quality metric.
+
+## Usage (inter-package: local crate graph)
 
 Analyze the current directory (finds `Cargo.toml` if present):
 
@@ -37,7 +61,7 @@ Analyze the current directory (finds `Cargo.toml` if present):
 cargo run -- -n 25
 ```
 
-Pick the “top-level orchestrators” view:
+Pick the "top-level orchestrators" view:
 
 ```bash
 cargo run -- --metric consumers-pagerank -n 25
@@ -81,7 +105,7 @@ For commands that support `--format json`, the JSON is wrapped for forwards-comp
 - `truncated`: whether `rows` was truncated
 - `json_limit`: the applied limit (if any)
 
-## Usage (module/item graph via cargo-modules)
+## Usage (intra-package: module/item graph via cargo-modules)
 
 `pkgrank modules` shells out to [`cargo-modules`](https://github.com/regexident/cargo-modules) and parses its DOT output.
 
@@ -91,7 +115,7 @@ Install once:
 cargo install cargo-modules
 ```
 
-Defaults are tuned for a “fast, actionable hotspot scan”:
+Defaults are tuned for a "fast, actionable hotspot scan":
 
 - aggregate by **file**
 - include **types + traits**
@@ -117,7 +141,7 @@ Workspace sweep (summary-only):
 cargo run -- modules-sweep --manifest-path ../Cargo.toml -p walk -p innr --lib
 ```
 
-Use presets when you want a different “view” quickly:
+Use presets when you want a different "view" quickly:
 
 ```bash
 # Item-level view, more verbose
@@ -147,7 +171,7 @@ cargo run -- mcp-stdio
 
 Toolset selection (optional):
 
-- Default: **slim** (small tool surface; “just works” for Cursor)
+- Default: **slim** (small tool surface; "just works" for Cursor)
 - Opt-in:
   - `PKGRANK_MCP_TOOLSET=full` to expose advanced tools (e.g. module/type graph centrality)
   - `PKGRANK_MCP_TOOLSET=debug` to also expose internal artifact-inspection tools
@@ -163,6 +187,21 @@ Tools (high level):
 - Advanced (opt-in: `PKGRANK_MCP_TOOLSET=full`): `pkgrank_status`, `pkgrank_modules`, `pkgrank_modules_sweep`
 - Debug (opt-in: `PKGRANK_MCP_TOOLSET=debug`): internal artifact-inspection tools (e.g. TLC tables, invariants list, PPR summaries)
 
+## Configurable invariant rules
+
+Cross-axis dependency rules are loaded from `dev_repos_overview.json` (under the `--root` directory at `evals/arch/dev_repos_overview.json`). Add a `forbidden_edges` array to define which axis-to-axis dependencies are violations:
+
+```json
+{
+  "axes": { "core": ["libfoo", "libbar"], "apps": ["myapp"] },
+  "forbidden_edges": [
+    { "from": "core", "to": "apps" }
+  ]
+}
+```
+
+If no `forbidden_edges` key is present, no invariant violations are reported.
+
 ## Tests (E2E targets)
 
 - Default test suite is **offline/deterministic** and uses **local real targets** (the dev super-workspace itself).
@@ -171,32 +210,33 @@ Tools (high level):
 
 ## Invariants (must not drift)
 
-- Edge meaning: $A \to B$ means “A depends on B”.
+- Edge meaning: $A \to B$ means "A depends on B".
 - Dependency kind gating: `--dev` / `--build` control whether those edges exist.
-- Workspace restriction: “workspace-only” means nodes/edges restricted to the current Cargo workspace members.
+- Workspace restriction: "workspace-only" means nodes/edges restricted to the current Cargo workspace members.
+
+## Non-goals
+
+- **Security / advisory analysis**: no CVE, advisory, or vulnerability integration. Use `cargo audit` or `cargo deny`.
+- **Graph visualization**: output is ranked tables and JSON, not rendered graph images. Use `cargo-depgraph` or Graphviz for visual graphs.
+- **Circular dependency detection**: the graph is treated as a DAG for centrality computation. Cycles are not surfaced.
+- **License compliance**: no license analysis or policy enforcement.
+- **Build / test / deploy**: pkgrank analyzes structure; it does not execute builds or tests.
 
 ## User stories (what this is for)
 
-These are the “real” workflows this tool is meant to serve.
+These are the "real" workflows this tool is meant to serve.
 
-- **Onboarding / orientation**: “What are the most central crates in this workspace? Who are the orchestrators?”
+- **Onboarding / orientation**: "What are the most central crates in this workspace? Who are the orchestrators?"
   - Use: `pkgrank analyze` (metric `pagerank` vs `consumers-pagerank`) and `pkgrank triage`.
-- **Dependency slimming / graph sanity**: “Why is this crate so central / so sticky? What depends on it?”
+- **Dependency slimming / graph sanity**: "Why is this crate so central / so sticky? What depends on it?"
   - Use: `pkgrank analyze --metric consumers-pagerank` + drill into origins and degrees; optionally generate artifacts via `pkgrank view`.
-- **Refactor hotspots inside a crate**: “Which files/modules/items are the coupling hotspots?”
+- **Refactor hotspots inside a crate**: "Which files/modules/items are the coupling hotspots?"
   - Use: `pkgrank modules` with `--aggregate file` (hot files) or `--aggregate node` (hot items).
-- **Workspace sweep**: “Run that hotspot scan across a bunch of crates and summarize failures/results.”
+- **Workspace sweep**: "Run that hotspot scan across a bunch of crates and summarize failures/results."
   - Use: `pkgrank modules-sweep` (summary-only by default).
-- **Shareable artifacts**: “Write an HTML snapshot I can point people at.”
+- **Shareable artifacts**: "Write an HTML snapshot I can point people at."
   - Use: `pkgrank view` / `pkgrank sweep-local`.
-
-Evidence pointers (qualitative):
-
-- Community demand for “internal dependency graph visualization” (rust-analyzer crate graph is commonly suggested): `https://www.reddit.com/r/rust/comments/x04zko/visualizing_internal_dependencies_as_a_graph/`
-- Cursor’s framing of MCP: “connect to external tools and data sources” (so MCP tends to be used for “triage + drilldown”): `https://cursor.com/docs/context/mcp`
-- Cargo’s own `cargo tree` docs emphasize dependency display, reverse-deps (`--invert`), and “duplicates” as a common pain point: `https://doc.rust-lang.org/cargo/commands/cargo-tree.html`
 
 ## Dependencies / integration notes
 
-- `pkgrank` includes its centrality algorithms internally (PageRank / PPR / betweenness / reachability),
-  to stay buildable as a standalone repo (no cross-repo path deps).
+- `pkgrank` delegates centrality algorithms to [`graphops`](https://crates.io/crates/graphops) (PageRank / PPR / betweenness / reachability).

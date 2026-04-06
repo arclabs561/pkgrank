@@ -1,4 +1,3 @@
-#![cfg(feature = "stdio")]
 //! MCP stdio server implementation for pkgrank.
 
 pub(crate) use rmcp::ErrorData as McpError;
