@@ -38,6 +38,9 @@ pub(crate) use blast_radius::*;
 mod polyglot;
 pub(crate) use polyglot::*;
 
+mod files;
+pub(crate) use files::*;
+
 mod upgrade_priority;
 pub(crate) use upgrade_priority::*;
 
@@ -101,6 +104,10 @@ enum Command {
     UpgradePriority(UpgradePriorityArgs),
     /// Analyze a non-Cargo lock file (npm, Python uv.lock, Go go.mod).
     Polyglot(PolyglotArgs),
+    /// Analyze file-level import graph within a single project.
+    ///
+    /// Static import parsing (no toolchain required). Auto-detects ecosystem.
+    Files(FilesArgs),
     /// Serve as an MCP stdio server (for Cursor).
     McpStdio,
 }
@@ -848,6 +855,7 @@ fn main() -> Result<()> {
         Some(Command::BlastRadius(args)) => ("blast-radius", run_blast_radius(&args)),
         Some(Command::UpgradePriority(args)) => ("upgrade-priority", run_upgrade_priority(&args)),
         Some(Command::Polyglot(args)) => ("polyglot", run_polyglot(&args)),
+        Some(Command::Files(args)) => ("files", run_files(&args)),
         Some(Command::McpStdio) => ("mcp-stdio", run_mcp_stdio()),
     };
 
