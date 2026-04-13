@@ -1212,11 +1212,14 @@ pub(crate) struct FileRow {
     pub role: FileRole,
     pub in_degree: usize,
     pub out_degree: usize,
+    /// How many files transitively depend on this one (blast radius).
+    pub dependents: usize,
+    /// How many files this one transitively depends on.
+    pub dependencies: usize,
     pub pagerank: f64,
     pub consumers_pagerank: f64,
     pub betweenness: f64,
     pub orphan: bool,
-    /// SCC label (files in the same cycle share a label). None if acyclic.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cycle_id: Option<usize>,
 }
@@ -1342,6 +1345,14 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
     let consumers_pr = pagerank_auto(&reverse_graph(&graph));
     let bc = betweenness_centrality(&graph);
 
+    // Transitive reachability (blast radius).
+    let mut edge_pairs: Vec<(usize, usize)> = Vec::new();
+    for e in graph.edge_references() {
+        edge_pairs.push((e.source().index(), e.target().index()));
+    }
+    let (transitive_dependents, transitive_deps) =
+        reachability_counts_edges(graph.node_count(), &edge_pairs);
+
     // SCC / cycle detection.
     let scc_labels = strongly_connected_components(&graph);
     let mut scc_sizes: HashMap<usize, usize> = HashMap::new();
@@ -1397,6 +1408,8 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
                 role,
                 in_degree,
                 out_degree,
+                dependents: transitive_dependents[n.index()],
+                dependencies: transitive_deps[n.index()],
                 pagerank: pr[n.index()],
                 consumers_pagerank: consumers_pr[n.index()],
                 betweenness: bc[n.index()],
@@ -1475,21 +1488,23 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                 result.ecosystem, args.metric, args.include_tests
             );
             println!(
-                "{:>4}  {:>10}  {:>10}  {:>9}  {:>3}  {:>3}  {:<10}  file",
-                "rank", "pr", "cons_pr", "between", "in", "out", "role"
+                "{:>4}  {:>10}  {:>10}  {:>9}  {:>5}  {:>5}  {:>3}  {:>3}  {:<10}  file",
+                "rank", "pr", "cons_pr", "between", "blast", "deps", "in", "out", "role"
             );
-            println!("{:\u{2500}<100}", "");
+            println!("{:\u{2500}<110}", "");
             for (i, r) in result.rows.iter().take(args.top).enumerate() {
                 let mut label = format!("{:?}", r.role).to_lowercase();
                 if r.cycle_id.is_some() {
                     label = format!("{}*", label);
                 }
                 println!(
-                    "{:>4}. {:>10.6} {:>10.6} {:>9.6} {:>3} {:>3}  {:<10}  {}",
+                    "{:>4}. {:>10.6} {:>10.6} {:>9.6} {:>5} {:>5} {:>3} {:>3}  {:<10}  {}",
                     i + 1,
                     r.pagerank,
                     r.consumers_pagerank,
                     r.betweenness,
+                    r.dependents,
+                    r.dependencies,
                     r.in_degree,
                     r.out_degree,
                     label,
