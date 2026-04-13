@@ -470,6 +470,25 @@ pub(crate) struct PkgrankPolyglotToolArgs {
     pub top: Option<usize>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct PkgrankFilesToolArgs {
+    /// Project path or GitHub URL (e.g. "owner/repo" or "https://github.com/owner/repo").
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Ecosystem: "cargo", "npm", "python", "go". Auto-detected if omitted.
+    #[serde(default)]
+    pub ecosystem: Option<String>,
+    /// Include test files in the graph.
+    #[serde(default)]
+    pub include_tests: Option<bool>,
+    /// Centrality metric: "pagerank", "consumers-pagerank", "betweenness", "indegree", "outdegree".
+    #[serde(default)]
+    pub metric: Option<String>,
+    /// Max rows to return.
+    #[serde(default)]
+    pub top: Option<usize>,
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -1435,6 +1454,65 @@ impl PkgrankStdioMcpFull {
             "rows": rows,
         });
         mcp_ok("pkgrank_polyglot", payload, None)
+    }
+
+    #[tool(
+        description = "Analyze file-level import graph within a project. Static parsing (no toolchain required). Supports local paths, GitHub URLs, and owner/repo shorthand. Returns centrality scores, cycles, orphans, and blast radius per file."
+    )]
+    async fn pkgrank_files(
+        &self,
+        params: Parameters<PkgrankFilesToolArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let ecosystem = params
+            .0
+            .ecosystem
+            .as_deref()
+            .map(|e| match e {
+                "cargo" => Ok(dep_graph::Ecosystem::Cargo),
+                "npm" => Ok(dep_graph::Ecosystem::Npm),
+                "python" => Ok(dep_graph::Ecosystem::Python),
+                "go" => Ok(dep_graph::Ecosystem::Go),
+                other => Err(McpError::invalid_params(
+                    format!("ecosystem must be one of: cargo, npm, python, go (got {other})"),
+                    None,
+                )),
+            })
+            .transpose()?;
+        let metric = params
+            .0
+            .metric
+            .as_deref()
+            .map(parse_metric)
+            .transpose()?
+            .unwrap_or(Metric::Pagerank);
+        let top = params.0.top.unwrap_or(25);
+        let args = FilesArgs {
+            path: params.0.path.unwrap_or_else(|| ".".to_string()),
+            ecosystem,
+            include_tests: params.0.include_tests.unwrap_or(false),
+            include_benches: false,
+            include_examples: false,
+            include_build: false,
+            metric,
+            top,
+            format: OutputFormat::Json,
+        };
+        let result =
+            files_analyze(&args).map_err(|e| McpError::internal_error(format!("{:#}", e), None))?;
+        let rows_total = result.rows.len();
+        let rows: Vec<_> = result.rows.into_iter().take(top).collect();
+        let payload = serde_json::json!({
+            "ecosystem": result.ecosystem,
+            "nodes": result.nodes,
+            "edges": result.edges,
+            "orphan_count": result.orphan_count,
+            "cycle_count": result.cycles.len(),
+            "cycles": result.cycles,
+            "rows_total": rows_total,
+            "rows_returned": rows.len(),
+            "rows": rows,
+        });
+        mcp_ok("pkgrank_files", payload, None)
     }
 }
 
