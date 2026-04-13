@@ -335,8 +335,10 @@ fn parse_rust_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
     let mut mod_to_file: HashMap<String, PathBuf> = HashMap::new();
     let mut file_to_mod: HashMap<PathBuf, String> = HashMap::new();
     let mut file_to_crate: HashMap<PathBuf, String> = HashMap::new();
+    let mut known_crates: HashSet<String> = HashSet::new();
 
     for (crate_dir, crate_name) in &crate_roots {
+        known_crates.insert(crate_name.clone());
         let src_dir = crate_dir.join("src");
         for file in files {
             if let Some(mod_path) = rust_file_to_mod_path(file, &src_dir, crate_name) {
@@ -364,7 +366,6 @@ fn parse_rust_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
         for line in content.lines() {
             let line = line.trim();
 
-            // `mod foo;` → this file owns foo, creating an edge.
             if let Some(mod_name) = parse_mod_declaration(line) {
                 let child_mod = format!("{}::{}", this_mod, mod_name);
                 if let Some(target) = mod_to_file.get(&child_mod) {
@@ -377,8 +378,9 @@ fn parse_rust_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
                 }
             }
 
-            // `use crate::foo::bar` or `use super::foo`
-            if let Some(targets) = parse_use_statement(line, &this_mod, &crate_name, &mod_to_file) {
+            if let Some(targets) =
+                parse_use_statement(line, &this_mod, &crate_name, &known_crates, &mod_to_file)
+            {
                 for target in targets {
                     if target != *file {
                         edges.push(FileEdge {
@@ -548,10 +550,10 @@ fn parse_use_statement(
     line: &str,
     current_mod: &str,
     crate_name: &str,
+    known_crates: &HashSet<String>,
     mod_to_file: &HashMap<String, PathBuf>,
 ) -> Option<Vec<PathBuf>> {
     let line = line.trim();
-    // Must start with `use ` or `pub use ` etc.
     let use_part = if let Some(rest) = strip_visibility(line).strip_prefix("use ") {
         rest
     } else if let Some(rest) = line.strip_prefix("use ") {
@@ -560,12 +562,9 @@ fn parse_use_statement(
         return None;
     };
 
-    // Remove trailing semicolon.
     let use_part = use_part.trim_end_matches(';').trim();
 
-    // Resolve the base path.
     let (base_mod, _rest) = if use_part.starts_with("crate::") {
-        // `use crate::foo::bar` → replace "crate" with actual crate name.
         let resolved = format!("{}{}", crate_name, &use_part["crate".len()..]);
         (resolved, "")
     } else if use_part.starts_with("super::") {
@@ -579,16 +578,11 @@ fn parse_use_statement(
         let relative = use_part.strip_prefix("self::").unwrap_or(use_part);
         (format!("{}::{}", current_mod, relative), "")
     } else {
-        // Check if first segment matches a workspace crate name (cross-crate import).
+        // Cross-crate: check if first segment is a known workspace crate.
         let first_seg = use_part.split("::").next().unwrap_or("");
-        if mod_to_file.contains_key(first_seg)
-            || mod_to_file
-                .keys()
-                .any(|k| k.starts_with(&format!("{}::", first_seg)))
-        {
+        if known_crates.contains(first_seg) {
             (use_part.to_string(), "")
         } else {
-            // External crate or std import.
             return None;
         }
     };
