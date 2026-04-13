@@ -187,12 +187,13 @@ fn classify_go_file(path: &Path, project_root: &Path) -> FileRole {
     let rel_str = rel.to_string_lossy();
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
-    if file_name.ends_with("_test.go") {
-        return FileRole::Test;
-    }
-
+    // Check bench before test -- _bench_test.go also ends with _test.go.
     if file_name.ends_with("_bench_test.go") {
         return FileRole::Bench;
+    }
+
+    if file_name.ends_with("_test.go") {
+        return FileRole::Test;
     }
 
     if rel_str.starts_with("cmd/") && file_name == "main.go" {
@@ -341,6 +342,10 @@ fn parse_rust_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
         known_crates.insert(crate_name.clone());
         let src_dir = crate_dir.join("src");
         for file in files {
+            // Only map files that are actually under this crate's src/.
+            if !file.starts_with(&src_dir) {
+                continue;
+            }
             if let Some(mod_path) = rust_file_to_mod_path(file, &src_dir, crate_name) {
                 mod_to_file.insert(mod_path.clone(), file.clone());
                 file_to_mod.insert(file.clone(), mod_path);
@@ -363,7 +368,10 @@ fn parse_rust_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
             .cloned()
             .unwrap_or_else(|| "crate".to_string());
 
-        for line in content.lines() {
+        // Join multi-line use/mod statements into logical lines.
+        let logical_lines = join_rust_logical_lines(&content);
+
+        for line in &logical_lines {
             let line = line.trim();
 
             if let Some(mod_name) = parse_mod_declaration(line) {
@@ -394,6 +402,58 @@ fn parse_rust_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
     }
 
     edges
+}
+
+/// Join multi-line `use` and `mod` statements into single logical lines.
+/// Handles patterns like:
+/// ```
+/// use crate::{
+///     foo,
+///     bar,
+/// };
+/// ```
+fn join_rust_logical_lines(content: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut accum = String::new();
+    let mut in_use = false;
+    let mut brace_depth: i32 = 0;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if in_use {
+            accum.push(' ');
+            accum.push_str(trimmed);
+            brace_depth += trimmed.chars().filter(|c| *c == '{').count() as i32;
+            brace_depth -= trimmed.chars().filter(|c| *c == '}').count() as i32;
+            if brace_depth <= 0 && trimmed.ends_with(';') {
+                result.push(std::mem::take(&mut accum));
+                in_use = false;
+                brace_depth = 0;
+            }
+            continue;
+        }
+
+        // Detect start of multi-line use/pub use.
+        let stripped = strip_visibility(trimmed);
+        let is_use_start = stripped.starts_with("use ") || trimmed.starts_with("use ");
+        if is_use_start && !trimmed.ends_with(';') {
+            in_use = true;
+            brace_depth = trimmed.chars().filter(|c| *c == '{').count() as i32;
+            brace_depth -= trimmed.chars().filter(|c| *c == '}').count() as i32;
+            accum = trimmed.to_string();
+            continue;
+        }
+
+        result.push(trimmed.to_string());
+    }
+
+    // Flush any unterminated accumulator.
+    if !accum.is_empty() {
+        result.push(accum);
+    }
+
+    result
 }
 
 /// Find all crate roots in a project: (crate_dir, crate_name).
@@ -568,12 +628,26 @@ fn parse_use_statement(
         let resolved = format!("{}{}", crate_name, &use_part["crate".len()..]);
         (resolved, "")
     } else if use_part.starts_with("super::") {
-        let parent = current_mod
-            .rsplit_once("::")
-            .map(|(p, _)| p)
-            .unwrap_or(current_mod);
-        let relative = use_part.strip_prefix("super::").unwrap_or(use_part);
-        (format!("{}::{}", parent, relative), "")
+        // Handle chained super:: (e.g. super::super::foo).
+        let mut base = current_mod.to_string();
+        let mut rest = use_part;
+        while let Some(after) = rest.strip_prefix("super::") {
+            base = base
+                .rsplit_once("::")
+                .map(|(p, _)| p.to_string())
+                .unwrap_or_default();
+            rest = after;
+        }
+        let resolved = if rest.is_empty() || base.is_empty() {
+            if base.is_empty() {
+                rest.to_string()
+            } else {
+                base
+            }
+        } else {
+            format!("{}::{}", base, rest)
+        };
+        (resolved, "")
     } else if use_part.starts_with("self::") {
         let relative = use_part.strip_prefix("self::").unwrap_or(use_part);
         (format!("{}::{}", current_mod, relative), "")
@@ -910,11 +984,19 @@ fn extract_js_import_specifiers(line: &str) -> Vec<String> {
         }
     }
 
-    // `require('...')` or `require("...")`
+    // `require('...')` -- only at statement level (not inside a string).
+    // Heuristic: require( must be preceded by start-of-line, `=`, `(`, or whitespace.
     if let Some(pos) = line.find("require(") {
-        let after = &line[pos + "require(".len()..];
-        if let Some(spec) = extract_quoted_string(after) {
-            specs.push(spec);
+        let before = if pos > 0 {
+            line.as_bytes()[pos - 1]
+        } else {
+            b' '
+        };
+        if matches!(before, b' ' | b'=' | b'(' | b'\t' | b',') || pos == 0 {
+            let after = &line[pos + "require(".len()..];
+            if let Some(spec) = extract_quoted_string(after) {
+                specs.push(spec);
+            }
         }
     }
 
