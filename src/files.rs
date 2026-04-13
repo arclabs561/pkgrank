@@ -235,11 +235,14 @@ fn should_include(role: FileRole, args: &FilesArgs) -> bool {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn detect_ecosystem(dir: &Path) -> Option<Ecosystem> {
+    // Priority: Cargo > Go > Python > npm.
+    // Cargo first because Rust projects often have package.json for tooling.
+    // Go before Python because go.mod is unambiguous.
     if dir.join("Cargo.toml").exists() {
         return Some(Ecosystem::Cargo);
     }
-    if dir.join("package.json").exists() || dir.join("package-lock.json").exists() {
-        return Some(Ecosystem::Npm);
+    if dir.join("go.mod").exists() {
+        return Some(Ecosystem::Go);
     }
     if dir.join("pyproject.toml").exists()
         || dir.join("uv.lock").exists()
@@ -247,8 +250,8 @@ pub(crate) fn detect_ecosystem(dir: &Path) -> Option<Ecosystem> {
     {
         return Some(Ecosystem::Python);
     }
-    if dir.join("go.mod").exists() {
-        return Some(Ecosystem::Go);
+    if dir.join("package.json").exists() || dir.join("package-lock.json").exists() {
+        return Some(Ecosystem::Npm);
     }
     None
 }
@@ -1212,8 +1215,20 @@ pub(crate) struct FileRow {
     pub pagerank: f64,
     pub consumers_pagerank: f64,
     pub betweenness: f64,
-    /// True if the file has no incoming edges and no outgoing edges (disconnected).
     pub orphan: bool,
+    /// SCC label (files in the same cycle share a label). None if acyclic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cycle_id: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct FilesResult {
+    pub rows: Vec<FileRow>,
+    pub nodes: usize,
+    pub edges: usize,
+    pub ecosystem: Ecosystem,
+    pub orphan_count: usize,
+    pub cycles: Vec<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1261,7 +1276,7 @@ fn expand_uri(s: &str) -> String {
     s.to_string()
 }
 
-pub(crate) fn files_analyze(args: &FilesArgs) -> Result<(Vec<FileRow>, usize, usize, Ecosystem)> {
+pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
     let uri = expand_uri(&args.path);
     let root = if is_url(&uri) {
         clone_repo_to_temp(&uri)?
@@ -1284,7 +1299,6 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<(Vec<FileRow>, usize, us
             )
         })?;
 
-    // Discover and classify files.
     let all_files = discover_files(&root, ecosystem);
     let mut included_files: Vec<PathBuf> = Vec::new();
     let mut file_roles: HashMap<PathBuf, FileRole> = HashMap::new();
@@ -1297,7 +1311,6 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<(Vec<FileRow>, usize, us
         }
     }
 
-    // Parse imports.
     let edges = match ecosystem {
         Ecosystem::Cargo => parse_rust_imports(&root, &included_files),
         Ecosystem::Python => parse_python_imports(&root, &included_files),
@@ -1305,7 +1318,6 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<(Vec<FileRow>, usize, us
         Ecosystem::Go => parse_go_imports(&root, &included_files),
     };
 
-    // Build graph.
     let mut graph: DiGraph<PathBuf, f64> = DiGraph::new();
     let mut node_map: HashMap<PathBuf, NodeIndex> = HashMap::new();
 
@@ -1314,7 +1326,6 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<(Vec<FileRow>, usize, us
         node_map.insert(file.clone(), idx);
     }
 
-    // Dedup edges.
     let mut seen_edges: HashSet<(usize, usize)> = HashSet::new();
     for edge in &edges {
         if let (Some(&from_idx), Some(&to_idx)) = (node_map.get(&edge.from), node_map.get(&edge.to))
@@ -1331,6 +1342,41 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<(Vec<FileRow>, usize, us
     let consumers_pr = pagerank_auto(&reverse_graph(&graph));
     let bc = betweenness_centrality(&graph);
 
+    // SCC / cycle detection.
+    let scc_labels = strongly_connected_components(&graph);
+    let mut scc_sizes: HashMap<usize, usize> = HashMap::new();
+    for &label in &scc_labels {
+        *scc_sizes.entry(label).or_insert(0) += 1;
+    }
+    // Collect cycles (SCCs with size > 1).
+    let mut cycles: Vec<Vec<String>> = Vec::new();
+    let mut cycle_id_map: HashMap<usize, usize> = HashMap::new(); // scc_label → cycle index
+    {
+        let mut cycle_labels: Vec<usize> = scc_sizes
+            .iter()
+            .filter(|(_, &size)| size > 1)
+            .map(|(&label, _)| label)
+            .collect();
+        cycle_labels.sort();
+
+        for (cycle_idx, &scc_label) in cycle_labels.iter().enumerate() {
+            cycle_id_map.insert(scc_label, cycle_idx);
+            let members: Vec<String> = graph
+                .node_indices()
+                .filter(|n| scc_labels[n.index()] == scc_label)
+                .map(|n| {
+                    graph
+                        .nw(n)
+                        .strip_prefix(&root)
+                        .unwrap_or(graph.nw(n))
+                        .to_string_lossy()
+                        .to_string()
+                })
+                .collect();
+            cycles.push(members);
+        }
+    }
+
     let mut rows: Vec<FileRow> = graph
         .node_indices()
         .map(|n| {
@@ -1341,9 +1387,10 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<(Vec<FileRow>, usize, us
                 .to_string_lossy()
                 .to_string();
             let role = file_roles.get(file).copied().unwrap_or(FileRole::Source);
-
             let in_degree = graph.neighbors_directed(n, Direction::Incoming).count();
             let out_degree = graph.neighbors_directed(n, Direction::Outgoing).count();
+            let scc_label = scc_labels[n.index()];
+            let cycle_id = cycle_id_map.get(&scc_label).copied();
 
             FileRow {
                 file: rel,
@@ -1354,6 +1401,7 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<(Vec<FileRow>, usize, us
                 consumers_pagerank: consumers_pr[n.index()],
                 betweenness: bc[n.index()],
                 orphan: in_degree == 0 && out_degree == 0,
+                cycle_id,
             }
         })
         .collect();
@@ -1366,10 +1414,16 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<(Vec<FileRow>, usize, us
         Metric::Outdegree => b.out_degree.cmp(&a.out_degree),
     });
 
-    let node_count = graph.node_count();
-    let edge_count = graph.edge_count();
+    let orphan_count = rows.iter().filter(|r| r.orphan).count();
 
-    Ok((rows, node_count, edge_count, ecosystem))
+    Ok(FilesResult {
+        nodes: graph.node_count(),
+        edges: graph.edge_count(),
+        ecosystem,
+        orphan_count,
+        cycles,
+        rows,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1377,7 +1431,7 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<(Vec<FileRow>, usize, us
 // ---------------------------------------------------------------------------
 
 pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
-    let (rows, nodes, edges, ecosystem) = files_analyze(args)?;
+    let result = files_analyze(args)?;
 
     let fmt = effective_format(args.format);
     match fmt {
@@ -1390,19 +1444,25 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                 ecosystem: Ecosystem,
                 nodes: usize,
                 edges: usize,
+                orphan_count: usize,
+                cycle_count: usize,
+                cycles: Vec<Vec<String>>,
                 rows_total: usize,
                 rows_returned: usize,
                 rows: Vec<FileRow>,
             }
-            let rows_total = rows.len();
-            let rows: Vec<_> = rows.into_iter().take(args.top).collect();
+            let rows_total = result.rows.len();
+            let rows: Vec<_> = result.rows.into_iter().take(args.top).collect();
             let out = Out {
                 schema_version: 1,
                 ok: true,
                 command: "files",
-                ecosystem,
-                nodes,
-                edges,
+                ecosystem: result.ecosystem,
+                nodes: result.nodes,
+                edges: result.edges,
+                orphan_count: result.orphan_count,
+                cycle_count: result.cycles.len(),
+                cycles: result.cycles,
                 rows_total,
                 rows_returned: rows.len(),
                 rows,
@@ -1412,14 +1472,18 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
         OutputFormat::Text => {
             println!(
                 "pkgrank files  ecosystem={}  metric={:?}  include_tests={}\n",
-                ecosystem, args.metric, args.include_tests
+                result.ecosystem, args.metric, args.include_tests
             );
             println!(
                 "{:>4}  {:>10}  {:>10}  {:>9}  {:>3}  {:>3}  {:<10}  file",
                 "rank", "pr", "cons_pr", "between", "in", "out", "role"
             );
             println!("{:\u{2500}<100}", "");
-            for (i, r) in rows.iter().take(args.top).enumerate() {
+            for (i, r) in result.rows.iter().take(args.top).enumerate() {
+                let mut label = format!("{:?}", r.role).to_lowercase();
+                if r.cycle_id.is_some() {
+                    label = format!("{}*", label);
+                }
                 println!(
                     "{:>4}. {:>10.6} {:>10.6} {:>9.6} {:>3} {:>3}  {:<10}  {}",
                     i + 1,
@@ -1428,12 +1492,45 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                     r.betweenness,
                     r.in_degree,
                     r.out_degree,
-                    format!("{:?}", r.role).to_lowercase(),
+                    label,
                     r.file
                 );
             }
-            let orphans = rows.iter().filter(|r| r.orphan).count();
-            println!("\n{} files, {} edges, {} orphans", nodes, edges, orphans);
+
+            // Summary.
+            let density = if result.nodes > 1 {
+                result.edges as f64 / (result.nodes as f64 * (result.nodes as f64 - 1.0))
+            } else {
+                0.0
+            };
+            println!(
+                "\n{} files, {} edges, density={:.4}",
+                result.nodes, result.edges, density
+            );
+            println!(
+                "{} orphans, {} cycles",
+                result.orphan_count,
+                result.cycles.len()
+            );
+
+            if !result.cycles.is_empty() {
+                println!("\ncycles (* marks files in a cycle):");
+                for (i, cycle) in result.cycles.iter().enumerate() {
+                    let preview: Vec<&str> = cycle.iter().take(5).map(|s| s.as_str()).collect();
+                    let suffix = if cycle.len() > 5 {
+                        format!(", ... (+{})", cycle.len() - 5)
+                    } else {
+                        String::new()
+                    };
+                    println!(
+                        "  cycle {}: {} files  [{}{}]",
+                        i,
+                        cycle.len(),
+                        preview.join(", "),
+                        suffix
+                    );
+                }
+            }
         }
     }
 

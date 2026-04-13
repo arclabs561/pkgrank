@@ -506,9 +506,9 @@ dependencies = [
 
 [[package]]
 name = "graphops"
-version = "0.1.2"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee68533e6a18a9d5105657b97173a50afe7d3e1d944f7e303ff4b564526d10a2"
+checksum = "1a1f0aff7c288fa16429c519b8c003ed79ebb4f8940136676de41d29ebc5cf7f"
 dependencies = [
  "ordered-float",
  "petgraph",

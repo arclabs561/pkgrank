@@ -65,8 +65,8 @@ impl<N, E> NodeWeightExt<N, E> for DiGraph<N, E> {
 use graphops::{
     betweenness_centrality, pagerank, pagerank_checked, pagerank_checked_run, pagerank_run,
     pagerank_weighted, pagerank_weighted_checked, pagerank_weighted_checked_run,
-    pagerank_weighted_run, personalized_pagerank, reachability_counts_edges, PageRankConfig,
-    PageRankRun,
+    pagerank_weighted_run, personalized_pagerank, reachability_counts_edges,
+    strongly_connected_components, PageRankConfig, PageRankRun,
 };
 
 #[derive(Parser, Debug)]
