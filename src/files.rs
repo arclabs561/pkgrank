@@ -456,6 +456,44 @@ fn join_rust_logical_lines(content: &str) -> Vec<String> {
     result
 }
 
+/// Join multi-line statements delimited by `(` `)` (Python, JS).
+fn join_paren_lines(content: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut accum = String::new();
+    let mut depth: i32 = 0;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if depth > 0 {
+            accum.push(' ');
+            accum.push_str(trimmed);
+            depth += trimmed.chars().filter(|c| *c == '(').count() as i32;
+            depth -= trimmed.chars().filter(|c| *c == ')').count() as i32;
+            if depth <= 0 {
+                result.push(std::mem::take(&mut accum));
+                depth = 0;
+            }
+            continue;
+        }
+
+        let opens = trimmed.chars().filter(|c| *c == '(').count() as i32;
+        let closes = trimmed.chars().filter(|c| *c == ')').count() as i32;
+        if opens > closes {
+            depth = opens - closes;
+            accum = trimmed.to_string();
+            continue;
+        }
+
+        result.push(trimmed.to_string());
+    }
+
+    if !accum.is_empty() {
+        result.push(accum);
+    }
+
+    result
+}
+
 /// Find all crate roots in a project: (crate_dir, crate_name).
 /// Handles single crates, workspaces, and nested crates/ directories.
 fn find_rust_crate_roots(root: &Path) -> Vec<(PathBuf, String)> {
@@ -740,10 +778,12 @@ fn parse_python_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
 
         let this_mod = file_to_mod.get(file).cloned().unwrap_or_default();
 
-        for line in content.lines() {
+        // Join multi-line imports: `from pkg import (\n  A,\n  B\n)`
+        let logical_lines = join_paren_lines(&content);
+
+        for line in &logical_lines {
             let line = line.trim();
 
-            // `from .foo import bar` or `from ..utils import X`
             if let Some(targets) =
                 parse_python_from_import(line, &this_mod, &pkg_name, &mod_to_file)
             {
@@ -758,7 +798,6 @@ fn parse_python_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
                 continue;
             }
 
-            // `import pkg.foo.bar`
             if let Some(targets) = parse_python_import(line, &mod_to_file) {
                 for target in targets {
                     if target != *file {
@@ -1173,6 +1212,8 @@ pub(crate) struct FileRow {
     pub pagerank: f64,
     pub consumers_pagerank: f64,
     pub betweenness: f64,
+    /// True if the file has no incoming edges and no outgoing edges (disconnected).
+    pub orphan: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1301,14 +1342,18 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<(Vec<FileRow>, usize, us
                 .to_string();
             let role = file_roles.get(file).copied().unwrap_or(FileRole::Source);
 
+            let in_degree = graph.neighbors_directed(n, Direction::Incoming).count();
+            let out_degree = graph.neighbors_directed(n, Direction::Outgoing).count();
+
             FileRow {
                 file: rel,
                 role,
-                in_degree: graph.neighbors_directed(n, Direction::Incoming).count(),
-                out_degree: graph.neighbors_directed(n, Direction::Outgoing).count(),
+                in_degree,
+                out_degree,
                 pagerank: pr[n.index()],
                 consumers_pagerank: consumers_pr[n.index()],
                 betweenness: bc[n.index()],
+                orphan: in_degree == 0 && out_degree == 0,
             }
         })
         .collect();
@@ -1387,7 +1432,8 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                     r.file
                 );
             }
-            println!("\n{} files, {} edges", nodes, edges);
+            let orphans = rows.iter().filter(|r| r.orphan).count();
+            println!("\n{} files, {} edges, {} orphans", nodes, edges, orphans);
         }
     }
 
