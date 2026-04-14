@@ -25,17 +25,9 @@ pub(crate) struct FilesArgs {
     #[arg(long, default_value_t = false)]
     pub include_tests: bool,
 
-    /// Include benchmark files.
+    /// Include all file roles (tests, benchmarks, examples, build scripts).
     #[arg(long, default_value_t = false)]
-    pub include_benches: bool,
-
-    /// Include example files.
-    #[arg(long, default_value_t = false)]
-    pub include_examples: bool,
-
-    /// Include build scripts (build.rs, setup.py, etc.).
-    #[arg(long, default_value_t = false)]
-    pub include_build: bool,
+    pub include_all: bool,
 
     /// Centrality metric for sorting.
     #[arg(short, long, value_enum, default_value_t = Metric::Pagerank)]
@@ -250,10 +242,8 @@ fn classify_file(path: &Path, project_root: &Path, ecosystem: Ecosystem) -> File
 fn should_include(role: FileRole, args: &FilesArgs) -> bool {
     match role {
         FileRole::LibRoot | FileRole::BinEntry | FileRole::Source => true,
-        FileRole::Test => args.include_tests,
-        FileRole::Bench => args.include_benches,
-        FileRole::Example => args.include_examples,
-        FileRole::Build => args.include_build,
+        FileRole::Test => args.include_tests || args.include_all,
+        FileRole::Bench | FileRole::Example | FileRole::Build => args.include_all,
     }
 }
 
