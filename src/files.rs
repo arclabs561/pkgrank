@@ -2326,6 +2326,27 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                 }
             }
 
+            // External dependency summary.
+            if !args.directory {
+                let mut dep_usage: HashMap<&str, usize> = HashMap::new();
+                for r in &result.rows {
+                    for dep in &r.external_deps {
+                        *dep_usage.entry(dep.as_str()).or_insert(0) += 1;
+                    }
+                }
+                if !dep_usage.is_empty() {
+                    let mut sorted_deps: Vec<(&&str, &usize)> = dep_usage.iter().collect();
+                    sorted_deps.sort_by(|a, b| b.1.cmp(a.1));
+                    println!(
+                        "\nexternal deps ({} unique, top by file count):",
+                        dep_usage.len()
+                    );
+                    for (dep, count) in sorted_deps.iter().take(5) {
+                        println!("  {} ({} files)", dep, count);
+                    }
+                }
+            }
+
             if !result.cycles.is_empty() {
                 println!("\ncycles (* in table):");
                 for (i, cycle) in result.cycles.iter().take(5).enumerate() {
