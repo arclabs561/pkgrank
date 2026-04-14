@@ -68,8 +68,8 @@ pub(crate) struct FilesArgs {
     #[arg(long, default_value_t = 90)]
     pub git_days: u64,
 
-    /// Persist results to SQLite database for cross-project queries.
-    #[arg(long, default_value_t = false)]
+    /// Persist results to SQLite database for cross-project queries (default: true).
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub store: bool,
 }
 
@@ -255,28 +255,9 @@ fn should_include(role: FileRole, args: &FilesArgs) -> bool {
 // Ecosystem auto-detection
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 pub(crate) fn detect_ecosystem(dir: &Path) -> Option<Ecosystem> {
-    // Priority: Cargo > Go > Python > npm.
-    if dir.join("Cargo.toml").exists() {
-        return Some(Ecosystem::Cargo);
-    }
-    if dir.join("go.mod").exists() {
-        return Some(Ecosystem::Go);
-    }
-    if dir.join("pyproject.toml").exists()
-        || dir.join("uv.lock").exists()
-        || dir.join("setup.py").exists()
-    {
-        return Some(Ecosystem::Python);
-    }
-    if dir.join("package.json").exists()
-        || dir.join("package-lock.json").exists()
-        || dir.join("deno.json").exists()
-        || dir.join("deno.jsonc").exists()
-    {
-        return Some(Ecosystem::Npm);
-    }
-    None
+    detect_all_ecosystems(dir).into_iter().next()
 }
 
 /// Detect all ecosystems present in a directory.
@@ -1842,55 +1823,94 @@ fn contract_to_directories(
 
 /// Detect cross-language seams: Python files importing Rust PyO3 modules.
 /// Creates edges from Python files to the Rust lib.rs that defines the #[pymodule].
-fn detect_pyo3_seams(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
+/// Detect cross-language FFI seams.
+/// PyO3: Python files importing Rust #[pymodule] modules.
+/// NAPI: JS/TS files importing Rust #[napi] modules.
+fn detect_ffi_seams(root: &Path, files: &[PathBuf], ecosystems: &[Ecosystem]) -> Vec<FileEdge> {
     let mut edges = Vec::new();
 
-    // Find Rust files with #[pymodule] and extract the module name.
-    let mut rust_module_files: Vec<(String, PathBuf)> = Vec::new();
+    // Find Rust files with FFI export markers.
+    let mut rust_modules: Vec<(String, PathBuf, &str)> = Vec::new(); // (name, file, kind)
     for file in files {
         if file.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
         }
         if let Ok(content) = std::fs::read_to_string(file) {
+            let crate_dir = file
+                .ancestors()
+                .find(|p| p.join("Cargo.toml").exists())
+                .unwrap_or(root);
+            let crate_name = read_rust_crate_name(crate_dir);
+
             if content.contains("#[pymodule]") || content.contains("#[pymodule(") {
-                // Try to find the module name from Cargo.toml [lib] name.
-                let crate_name = read_rust_crate_name(
-                    file.ancestors()
-                        .find(|p| p.join("Cargo.toml").exists())
-                        .unwrap_or(root),
-                );
-                rust_module_files.push((crate_name, file.clone()));
+                rust_modules.push((crate_name.clone(), file.clone(), "pyo3"));
+            }
+            if content.contains("#[napi]") || content.contains("#[napi(") {
+                rust_modules.push((crate_name, file.clone(), "napi"));
             }
         }
     }
 
-    if rust_module_files.is_empty() {
+    if rust_modules.is_empty() {
         return edges;
     }
 
-    // Find Python files that import any of the detected module names.
-    let module_names: HashSet<&str> = rust_module_files.iter().map(|(n, _)| n.as_str()).collect();
+    let pyo3_names: HashSet<&str> = rust_modules
+        .iter()
+        .filter(|(_, _, k)| *k == "pyo3")
+        .map(|(n, _, _)| n.as_str())
+        .collect();
+    let napi_names: HashSet<&str> = rust_modules
+        .iter()
+        .filter(|(_, _, k)| *k == "napi")
+        .map(|(n, _, _)| n.as_str())
+        .collect();
 
     for file in files {
-        if file.extension().and_then(|e| e.to_str()) != Some("py") {
-            continue;
+        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+        // PyO3: Python -> Rust
+        if ext == "py" && ecosystems.contains(&Ecosystem::Python) {
+            if let Ok(content) = std::fs::read_to_string(file) {
+                for line in content.lines() {
+                    let line = line.trim();
+                    if !line.starts_with("import ") && !line.starts_with("from ") {
+                        continue;
+                    }
+                    for mod_name in &pyo3_names {
+                        if line.contains(mod_name) {
+                            for (name, rust_file, kind) in &rust_modules {
+                                if *kind == "pyo3" && name == mod_name {
+                                    edges.push(FileEdge {
+                                        from: file.clone(),
+                                        to: rust_file.clone(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
-        if let Ok(content) = std::fs::read_to_string(file) {
-            for line in content.lines() {
-                let line = line.trim();
-                // Match: `import mod`, `from mod import ...`, `from .mod import ...`,
-                // `from pkg.mod import ...`
-                for mod_name in &module_names {
-                    if line.contains(mod_name)
-                        && (line.starts_with("import ") || line.starts_with("from "))
-                    {
-                        // Find the corresponding Rust file.
-                        for (name, rust_file) in &rust_module_files {
-                            if name == mod_name {
-                                edges.push(FileEdge {
-                                    from: file.clone(),
-                                    to: rust_file.clone(),
-                                });
+
+        // NAPI: JS/TS -> Rust
+        if matches!(ext, "ts" | "tsx" | "js" | "jsx" | "mjs")
+            && ecosystems.contains(&Ecosystem::Npm)
+        {
+            if let Ok(content) = std::fs::read_to_string(file) {
+                for line in content.lines() {
+                    let line = line.trim();
+                    for mod_name in &napi_names {
+                        if line.contains(mod_name)
+                            && (line.starts_with("import ") || line.contains("require("))
+                        {
+                            for (name, rust_file, kind) in &rust_modules {
+                                if *kind == "napi" && name == mod_name {
+                                    edges.push(FileEdge {
+                                        from: file.clone(),
+                                        to: rust_file.clone(),
+                                    });
+                                }
                             }
                         }
                     }
@@ -2056,9 +2076,9 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
         edges.extend(eco_edges);
     }
 
-    // Cross-language seam edges (PyO3: Python -> Rust).
-    if ecosystems.contains(&Ecosystem::Cargo) && ecosystems.contains(&Ecosystem::Python) {
-        edges.extend(detect_pyo3_seams(&root, &included_files));
+    // Cross-language seam edges (PyO3: Python -> Rust, NAPI: JS -> Rust).
+    if ecosystems.contains(&Ecosystem::Cargo) && ecosystems.len() > 1 {
+        edges.extend(detect_ffi_seams(&root, &included_files, &ecosystems));
     }
 
     // Extract external dependency names per file.

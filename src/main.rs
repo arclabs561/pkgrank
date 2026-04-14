@@ -1073,7 +1073,9 @@ fn run_query(args: &QueryArgs) -> Result<()> {
         )
     })?;
 
-    match args.what.as_str() {
+    let (query_type, query_arg) = args.what.split_once(' ').unwrap_or((&args.what, ""));
+
+    match query_type {
         "hotspots" => {
             let rows = store::query_top_churn(&conn, args.top)?;
             if rows.is_empty() {
@@ -1096,6 +1098,47 @@ fn run_query(args: &QueryArgs) -> Result<()> {
             println!("{:\u{2500}<40}", "");
             for (dep, count) in &rows {
                 println!("{:>5}  {}", count, dep);
+            }
+        }
+        "files" => {
+            // Search for a file across all stored projects.
+            let search = if query_arg.is_empty() { "%" } else { query_arg };
+            let pattern = format!("%{}%", search);
+            let mut stmt = conn.prepare(
+                "SELECT p.path, f.path, f.pagerank, f.in_degree, f.dependents, f.churn_risk
+                 FROM files f
+                 JOIN snapshots s ON f.snapshot_id = s.id
+                 JOIN projects p ON s.project_id = p.id
+                 WHERE s.id = (SELECT MAX(s2.id) FROM snapshots s2 WHERE s2.project_id = p.id)
+                 AND f.path LIKE ?1
+                 ORDER BY f.pagerank DESC
+                 LIMIT ?2",
+            )?;
+            println!(
+                "{:>10}  {:>3}  {:>5}  {:>8}  {:<35}  {}",
+                "pr", "in", "blast", "churn", "file", "project"
+            );
+            println!("{:\u{2500}<90}", "");
+            let mut rows = stmt.query(rusqlite::params![pattern, args.top])?;
+            while let Some(row) = rows.next()? {
+                let project: String = row.get(0)?;
+                let file: String = row.get(1)?;
+                let pr: f64 = row.get(2)?;
+                let in_deg: i64 = row.get(3)?;
+                let deps: i64 = row.get(4)?;
+                let churn: Option<f64> = row.get(5)?;
+                let churn_str = churn
+                    .map(|c| format!("{:.6}", c))
+                    .unwrap_or_else(|| "-".to_string());
+                let short_proj = if project.len() > 30 {
+                    &project[project.len() - 30..]
+                } else {
+                    &project
+                };
+                println!(
+                    "{:>10.6}  {:>3}  {:>5}  {:>8}  {:<35}  {}",
+                    pr, in_deg, deps, churn_str, file, short_proj
+                );
             }
         }
         "drift" => {
@@ -1156,11 +1199,11 @@ fn run_query(args: &QueryArgs) -> Result<()> {
                 );
             }
         }
-        other => {
-            // Raw SQL query.
+        _ => {
+            // Raw SQL query (use the full original string).
             let mut stmt = conn
-                .prepare(other)
-                .with_context(|| format!("invalid SQL: {}", other))?;
+                .prepare(&args.what)
+                .with_context(|| format!("invalid SQL: {}", args.what))?;
             let col_count = stmt.column_count();
             let names: Vec<String> = (0..col_count)
                 .map(|i| stmt.column_name(i).unwrap_or("?").to_string())
