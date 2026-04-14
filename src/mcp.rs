@@ -1497,6 +1497,7 @@ impl PkgrankStdioMcpFull {
             top,
             format: OutputFormat::Json,
             directory: false,
+            cache: true,
             focus: None,
             git: false,
             git_days: 90,

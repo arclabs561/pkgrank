@@ -68,6 +68,10 @@ pub(crate) struct FilesArgs {
     #[arg(long, default_value_t = false)]
     pub git: bool,
 
+    /// Cache analysis results. Invalidates when source files change.
+    #[arg(long, default_value_t = false)]
+    pub cache: bool,
+
     /// Git history window in days (default: 90).
     #[arg(long, default_value_t = 90)]
     pub git_days: u64,
@@ -77,7 +81,7 @@ pub(crate) struct FilesArgs {
 // File classification
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum FileRole {
     /// Library root (lib.rs, __init__.py, index.ts).
@@ -1600,7 +1604,7 @@ fn extract_go_import(line: &str) -> Option<String> {
 // Output row
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct FileRow {
     pub file: String,
     pub role: FileRole,
@@ -1626,7 +1630,7 @@ pub(crate) struct FileRow {
     pub external_deps: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct FilesResult {
     pub rows: Vec<FileRow>,
     pub nodes: usize,
@@ -1634,7 +1638,6 @@ pub(crate) struct FilesResult {
     pub ecosystem: Ecosystem,
     pub orphan_count: usize,
     pub cycles: Vec<Vec<String>>,
-    /// Direct edges: (from_file, to_file).
     #[serde(skip)]
     pub direct_edges: Vec<(String, String)>,
 }
@@ -1819,6 +1822,39 @@ fn expand_uri(s: &str) -> String {
     s.to_string()
 }
 
+/// Compute a cache key from file paths + mtimes + analysis args.
+fn files_cache_key(files: &[PathBuf], args: &FilesArgs) -> u64 {
+    let mut material = format!(
+        "v2\necosystem={:?}\ndir={}\ngit={}\ngit_days={}\ntests={}\n",
+        args.ecosystem, args.directory, args.git, args.git_days, args.include_tests
+    );
+    for f in files {
+        let mtime = f
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        material.push_str(&format!("{}:{}\n", f.display(), mtime));
+    }
+    fnv1a64(material.as_bytes())
+}
+
+fn files_cache_read(cache_dir: &Path, key: u64) -> Option<FilesResult> {
+    let path = cache_dir.join(format!("files_{:016x}.json", key));
+    let raw = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn files_cache_write(cache_dir: &Path, key: u64, result: &FilesResult) {
+    let _ = std::fs::create_dir_all(cache_dir);
+    let path = cache_dir.join(format!("files_{:016x}.json", key));
+    if let Ok(json) = serde_json::to_string(result) {
+        let _ = std::fs::write(&path, json);
+    }
+}
+
 pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
     let uri = expand_uri(&args.path);
     let root = if is_url(&uri) {
@@ -1843,6 +1879,16 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
         })?;
 
     let all_files = discover_files(&root, ecosystem);
+
+    // Cache check: use file paths + mtimes as cache key.
+    let cache_dir = root.join("evals/pkgrank/files_cache");
+    if args.cache {
+        let key = files_cache_key(&all_files, args);
+        if let Some(cached) = files_cache_read(&cache_dir, key) {
+            return Ok(cached);
+        }
+    }
+
     let mut included_files: Vec<PathBuf> = Vec::new();
     let mut file_roles: HashMap<PathBuf, FileRole> = HashMap::new();
 
@@ -2118,7 +2164,7 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
 
     let orphan_count = rows.iter().filter(|r| r.orphan).count();
 
-    Ok(FilesResult {
+    let result = FilesResult {
         nodes: av.node_count,
         edges: av.edge_count,
         ecosystem,
@@ -2126,7 +2172,15 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
         cycles,
         rows,
         direct_edges: av.direct_edges,
-    })
+    };
+
+    // Cache write.
+    if args.cache {
+        let key = files_cache_key(&all_files, args);
+        files_cache_write(&cache_dir, key, &result);
+    }
+
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
