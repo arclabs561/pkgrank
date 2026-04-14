@@ -1063,6 +1063,7 @@ pub(crate) struct QueryArgs {
     pub top: usize,
 }
 
+#[allow(clippy::print_literal)]
 fn run_query(args: &QueryArgs) -> Result<()> {
     let db_path = store::default_db_path();
     let conn = store::open_db(&db_path).with_context(|| {
@@ -1100,17 +1101,17 @@ fn run_query(args: &QueryArgs) -> Result<()> {
         "projects" => {
             let mut stmt = conn.prepare(
                 "SELECT p.path, p.ecosystem, s.node_count, s.edge_count, s.cycle_count,
-                        datetime(s.analyzed_at, 'unixepoch', 'localtime') as analyzed
+                        s.git_rev, datetime(s.analyzed_at, 'unixepoch', 'localtime') as analyzed
                  FROM projects p
                  JOIN snapshots s ON s.project_id = p.id
                  WHERE s.id = (SELECT MAX(s2.id) FROM snapshots s2 WHERE s2.project_id = p.id)
                  ORDER BY s.analyzed_at DESC",
             )?;
             println!(
-                "{:<45}  {:>5}  {:>5}  {:>3}  {:<8}  {}",
-                "project", "files", "edges", "cyc", "eco", "analyzed"
+                "{:<40}  {:>5}  {:>5}  {:>3}  {:<8}  {:<9}  {}",
+                "project", "files", "edges", "cyc", "eco", "rev", "analyzed"
             );
-            println!("{:\u{2500}<95}", "");
+            println!("{:\u{2500}<100}", "");
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
                 let path: String = row.get(0)?;
@@ -1118,15 +1119,18 @@ fn run_query(args: &QueryArgs) -> Result<()> {
                 let nodes: i64 = row.get(2)?;
                 let edges: i64 = row.get(3)?;
                 let cycles: i64 = row.get(4)?;
-                let analyzed: String = row.get(5)?;
-                let short = if path.len() > 45 {
-                    &path[path.len() - 45..]
+                let rev: String = row
+                    .get::<_, Option<String>>(5)?
+                    .unwrap_or_else(|| "-".to_string());
+                let analyzed: String = row.get(6)?;
+                let short = if path.len() > 40 {
+                    &path[path.len() - 40..]
                 } else {
                     &path
                 };
                 println!(
-                    "{:<45}  {:>5}  {:>5}  {:>3}  {:<8}  {}",
-                    short, nodes, edges, cycles, eco, analyzed
+                    "{:<40}  {:>5}  {:>5}  {:>3}  {:<8}  {:<9}  {}",
+                    short, nodes, edges, cycles, eco, rev, analyzed
                 );
             }
         }

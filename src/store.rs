@@ -47,6 +47,7 @@ fn migrate(conn: &Connection) -> Result<()> {
                 id INTEGER PRIMARY KEY,
                 project_id INTEGER REFERENCES projects(id),
                 analyzed_at INTEGER NOT NULL,
+                git_rev TEXT,
                 node_count INTEGER,
                 edge_count INTEGER,
                 cycle_count INTEGER,
@@ -86,6 +87,17 @@ fn migrate(conn: &Connection) -> Result<()> {
 }
 
 /// Store a FilesResult as a new snapshot.
+/// Get the current git HEAD rev for a directory.
+pub(crate) fn git_head_rev(dir: &Path) -> Option<String> {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
 pub(crate) fn store_snapshot(
     conn: &Connection,
     project_path: &str,
@@ -109,13 +121,17 @@ pub(crate) fn store_snapshot(
         |row| row.get(0),
     )?;
 
+    // Detect git revision.
+    let git_rev = git_head_rev(Path::new(project_path));
+
     // Insert snapshot.
     conn.execute(
-        "INSERT INTO snapshots (project_id, analyzed_at, node_count, edge_count, cycle_count, orphan_count)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO snapshots (project_id, analyzed_at, git_rev, node_count, edge_count, cycle_count, orphan_count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             project_id,
             now,
+            git_rev,
             result.nodes,
             result.edges,
             result.cycles.len(),
