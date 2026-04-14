@@ -49,6 +49,12 @@ pub(crate) struct FilesArgs {
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub format: OutputFormat,
 
+    /// Aggregate results by directory instead of individual files.
+    ///
+    /// Useful for large codebases where file-level is too noisy.
+    #[arg(long, default_value_t = false)]
+    pub directory: bool,
+
     /// Focus on a specific file: show its imports, dependents, and co-changers.
     ///
     /// Accepts a partial path (e.g. "graph.rs" matches "src/hnsw/graph.rs").
@@ -1405,6 +1411,56 @@ fn git_file_commit_counts(root: &Path, days: u64) -> HashMap<String, usize> {
 }
 
 /// Clone a git URL to a temp directory. Returns the path.
+/// Contract a file-level graph into a directory-level graph.
+/// Returns: (contracted graph, node labels, file count per directory).
+fn contract_to_directories(
+    graph: &DiGraph<PathBuf, f64>,
+    root: &Path,
+) -> (DiGraph<String, f64>, Vec<String>, HashMap<String, usize>) {
+    let mut dir_indices: HashMap<String, NodeIndex> = HashMap::new();
+    let mut contracted: DiGraph<String, f64> = DiGraph::new();
+    let mut file_to_dir_idx: Vec<NodeIndex> = Vec::new();
+    let mut file_counts: HashMap<String, usize> = HashMap::new();
+
+    for n in graph.node_indices() {
+        let file = graph.nw(n);
+        let rel = file.strip_prefix(root).unwrap_or(file);
+        let dir = rel
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| ".".to_string());
+        let dir = if dir.is_empty() { ".".to_string() } else { dir };
+
+        *file_counts.entry(dir.clone()).or_insert(0) += 1;
+
+        let dir_idx = *dir_indices
+            .entry(dir.clone())
+            .or_insert_with(|| contracted.add_node(dir));
+        file_to_dir_idx.push(dir_idx);
+    }
+
+    // Add edges between directories (merge weights).
+    for e in graph.edge_references() {
+        let from_dir = file_to_dir_idx[e.source().index()];
+        let to_dir = file_to_dir_idx[e.target().index()];
+        if from_dir == to_dir {
+            continue;
+        }
+        let cur = contracted
+            .find_edge(from_dir, to_dir)
+            .and_then(|ei| contracted.edge_weight(ei).copied())
+            .unwrap_or(0.0);
+        contracted.update_edge(from_dir, to_dir, cur + e.weight());
+    }
+
+    let labels: Vec<String> = contracted
+        .node_indices()
+        .map(|n| contracted.nw(n).clone())
+        .collect();
+
+    (contracted, labels, file_counts)
+}
+
 fn clone_repo_to_temp(url: &str) -> Result<PathBuf> {
     let tmp = std::env::temp_dir().join(format!("pkgrank-{:016x}", fnv1a64(url.as_bytes())));
     if tmp.exists() {
@@ -1506,28 +1562,50 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
         }
     }
 
-    // Centrality.
-    let pr = pagerank_auto(&graph);
-    let consumers_pr = pagerank_auto(&reverse_graph(&graph));
-    let bc = betweenness_centrality(&graph);
+    // Directory aggregation: contract to directory-level graph.
+    let (analysis_graph, node_labels, _dir_file_counts) = if args.directory {
+        let (contracted, labels, counts) = contract_to_directories(&graph, &root);
+        (contracted, labels, Some(counts))
+    } else {
+        let labels: Vec<String> = graph
+            .node_indices()
+            .map(|n| {
+                graph
+                    .nw(n)
+                    .strip_prefix(&root)
+                    .unwrap_or(graph.nw(n))
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        (
+            graph.map(|_, n| n.to_string_lossy().to_string(), |_, w| *w),
+            labels,
+            None,
+        )
+    };
+
+    // Centrality (on the analysis graph -- file or directory level).
+    let pr = pagerank_auto(&analysis_graph);
+    let consumers_pr = pagerank_auto(&reverse_graph(&analysis_graph));
+    let bc = betweenness_centrality(&analysis_graph);
 
     // Transitive reachability (blast radius).
     let mut edge_pairs: Vec<(usize, usize)> = Vec::new();
-    for e in graph.edge_references() {
+    for e in analysis_graph.edge_references() {
         edge_pairs.push((e.source().index(), e.target().index()));
     }
     let (transitive_dependents, transitive_deps) =
-        reachability_counts_edges(graph.node_count(), &edge_pairs);
+        reachability_counts_edges(analysis_graph.node_count(), &edge_pairs);
 
     // SCC / cycle detection.
-    let scc_labels = strongly_connected_components(&graph);
+    let scc_labels = strongly_connected_components(&analysis_graph);
     let mut scc_sizes: HashMap<usize, usize> = HashMap::new();
     for &label in &scc_labels {
         *scc_sizes.entry(label).or_insert(0) += 1;
     }
-    // Collect cycles (SCCs with size > 1).
     let mut cycles: Vec<Vec<String>> = Vec::new();
-    let mut cycle_id_map: HashMap<usize, usize> = HashMap::new(); // scc_label → cycle index
+    let mut cycle_id_map: HashMap<usize, usize> = HashMap::new();
     {
         let mut cycle_labels: Vec<usize> = scc_sizes
             .iter()
@@ -1538,17 +1616,10 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
 
         for (cycle_idx, &scc_label) in cycle_labels.iter().enumerate() {
             cycle_id_map.insert(scc_label, cycle_idx);
-            let members: Vec<String> = graph
+            let members: Vec<String> = analysis_graph
                 .node_indices()
                 .filter(|n| scc_labels[n.index()] == scc_label)
-                .map(|n| {
-                    graph
-                        .nw(n)
-                        .strip_prefix(&root)
-                        .unwrap_or(graph.nw(n))
-                        .to_string_lossy()
-                        .to_string()
-                })
+                .map(|n| node_labels[n.index()].clone())
                 .collect();
             cycles.push(members);
         }
@@ -1562,23 +1633,47 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
     };
     let max_commits = git_counts.values().copied().max().unwrap_or(1).max(1) as f64;
 
-    let mut rows: Vec<FileRow> = graph
+    let mut rows: Vec<FileRow> = analysis_graph
         .node_indices()
         .map(|n| {
-            let file = graph.nw(n);
-            let rel = file
-                .strip_prefix(&root)
-                .unwrap_or(file)
-                .to_string_lossy()
-                .to_string();
-            let role = file_roles.get(file).copied().unwrap_or(FileRole::Source);
-            let in_degree = graph.neighbors_directed(n, Direction::Incoming).count();
-            let out_degree = graph.neighbors_directed(n, Direction::Outgoing).count();
+            let rel = node_labels[n.index()].clone();
+            let role = if args.directory {
+                FileRole::Source // Directories don't have a meaningful role.
+            } else {
+                // Look up role from the original file path.
+                let full = root.join(&rel);
+                file_roles.get(&full).copied().unwrap_or(FileRole::Source)
+            };
+            let in_degree = analysis_graph
+                .neighbors_directed(n, Direction::Incoming)
+                .count();
+            let out_degree = analysis_graph
+                .neighbors_directed(n, Direction::Outgoing)
+                .count();
             let scc_label = scc_labels[n.index()];
             let cycle_id = cycle_id_map.get(&scc_label).copied();
 
             let commits = if args.git {
-                Some(git_counts.get(&rel).copied().unwrap_or(0))
+                if args.directory {
+                    // Sum commits for all files in this directory.
+                    Some(
+                        git_counts
+                            .iter()
+                            .filter(|(path, _)| {
+                                Path::new(path)
+                                    .parent()
+                                    .map(|p| {
+                                        p.to_string_lossy() == rel
+                                            || (rel == "." && p == Path::new(""))
+                                    })
+                                    .unwrap_or(false)
+                            })
+                            .map(|(_, &c)| c)
+                            .sum::<usize>(),
+                    )
+                } else {
+                    Some(git_counts.get(&rel).copied().unwrap_or(0))
+                }
             } else {
                 None
             };
@@ -1623,28 +1718,18 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
     let orphan_count = rows.iter().filter(|r| r.orphan).count();
 
     // Collect direct edges for focus mode.
-    let direct_edges: Vec<(String, String)> = graph
+    let direct_edges: Vec<(String, String)> = analysis_graph
         .edge_references()
         .map(|e| {
-            let from = graph.nw(e.source());
-            let to = graph.nw(e.target());
-            let from_rel = from
-                .strip_prefix(&root)
-                .unwrap_or(from)
-                .to_string_lossy()
-                .to_string();
-            let to_rel = to
-                .strip_prefix(&root)
-                .unwrap_or(to)
-                .to_string_lossy()
-                .to_string();
+            let from_rel = node_labels[e.source().index()].clone();
+            let to_rel = node_labels[e.target().index()].clone();
             (from_rel, to_rel)
         })
         .collect();
 
     Ok(FilesResult {
-        nodes: graph.node_count(),
-        edges: graph.edge_count(),
+        nodes: analysis_graph.node_count(),
+        edges: analysis_graph.edge_count(),
         ecosystem,
         orphan_count,
         cycles,

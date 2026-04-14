@@ -1496,6 +1496,7 @@ impl PkgrankStdioMcpFull {
             metric,
             top,
             format: OutputFormat::Json,
+            directory: false,
             focus: None,
             git: false,
             git_days: 90,
