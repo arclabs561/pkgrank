@@ -1666,6 +1666,9 @@ pub(crate) struct FileRow {
     pub co_changers: Vec<(String, usize)>,
     /// Instability: out_degree / (in_degree + out_degree). 0 = stable, 1 = unstable.
     pub instability: f64,
+    /// Unique contributors in the git window (bus factor proxy).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contributors: Option<usize>,
     /// Structural role + stability-volatility quadrant.
     pub structure: String,
     /// External packages this file imports (ecosystem-level deps).
@@ -1695,17 +1698,17 @@ pub(crate) struct FilesResult {
 
 /// Parse git log to get per-file commit counts within a time window.
 struct GitStats {
-    /// Per-file commit counts.
     counts: HashMap<String, usize>,
-    /// Top co-changers per file: files that most frequently change in the same commit.
     co_changers: HashMap<String, Vec<(String, usize)>>,
+    /// Unique contributors per file (bus factor proxy).
+    contributors: HashMap<String, usize>,
 }
 
 fn git_file_stats(root: &Path, days: u64) -> GitStats {
     let since = format!("--since={} days ago", days);
-    // Use %x00 as commit separator so we can group files per commit.
+    // Use %x00 as separator, include author email for contributor counting.
     let out = ProcessCommand::new("git")
-        .args(["log", "--name-only", "--pretty=format:%x00", &since])
+        .args(["log", "--name-only", "--pretty=format:%x00%ae", &since])
         .current_dir(root)
         .output();
     let out = match out {
@@ -1714,6 +1717,7 @@ fn git_file_stats(root: &Path, days: u64) -> GitStats {
             return GitStats {
                 counts: HashMap::new(),
                 co_changers: HashMap::new(),
+                contributors: HashMap::new(),
             }
         }
     };
@@ -1721,17 +1725,25 @@ fn git_file_stats(root: &Path, days: u64) -> GitStats {
 
     let mut counts: HashMap<String, usize> = HashMap::new();
     let mut pair_counts: HashMap<(String, String), usize> = HashMap::new();
+    let mut file_authors: HashMap<String, HashSet<String>> = HashMap::new();
 
-    // Split by commit separator.
+    // Split by commit separator. Format: \0author@email\nfile1\nfile2...
     for commit_block in stdout.split('\0') {
-        let files: Vec<&str> = commit_block
+        let mut lines = commit_block
             .lines()
             .map(|l| l.trim())
-            .filter(|l| !l.is_empty())
-            .collect();
+            .filter(|l| !l.is_empty());
+        let author = lines.next().unwrap_or("").to_string();
+        let files: Vec<&str> = lines.collect();
 
         for &f in &files {
             *counts.entry(f.to_string()).or_insert(0) += 1;
+            if !author.is_empty() {
+                file_authors
+                    .entry(f.to_string())
+                    .or_default()
+                    .insert(author.clone());
+            }
         }
 
         // Co-change pairs (only for commits with 2-20 files to avoid noise).
@@ -1768,9 +1780,15 @@ fn git_file_stats(root: &Path, days: u64) -> GitStats {
         partners.truncate(5);
     }
 
+    let contributors: HashMap<String, usize> = file_authors
+        .into_iter()
+        .map(|(f, authors)| (f, authors.len()))
+        .collect();
+
     GitStats {
         counts,
         co_changers,
+        contributors,
     }
 }
 
@@ -2252,6 +2270,7 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
         GitStats {
             counts: HashMap::new(),
             co_changers: HashMap::new(),
+            contributors: HashMap::new(),
         }
     };
     let max_commits = git_stats.counts.values().copied().max().unwrap_or(1).max(1) as f64;
@@ -2299,6 +2318,11 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
             } else {
                 Vec::new()
             };
+            let contributors = if args.git {
+                Some(git_stats.contributors.get(&rel).copied().unwrap_or(0))
+            } else {
+                None
+            };
             let ext_deps = if args.directory {
                 Vec::new()
             } else {
@@ -2326,6 +2350,7 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
                 } else {
                     0.0
                 },
+                contributors,
                 structure: String::new(), // filled below
                 external_deps: ext_deps,
             }
@@ -2388,7 +2413,7 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
             let is_central = row.in_degree > median_in;
             row.structure = match (is_central, is_volatile) {
                 (true, true) => format!("{}!!", base), // danger zone
-                (true, false) => format!("{}", base),  // load-bearing (stable)
+                (true, false) => base.to_string(),     // load-bearing (stable)
                 (false, true) => format!("{}~", base), // volatile but low-risk
                 (false, false) => base.to_string(),    // stable leaf
             };

@@ -6,6 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::files::FilesResult;
 
+// Current schema version (bump when adding migrations).
+#[allow(dead_code)]
 const SCHEMA_VERSION: i32 = 2;
 
 /// Open or create the pkgrank SQLite database.
@@ -87,10 +89,11 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
 
     if version < 2 {
-        // Add instability and structure columns.
         conn.execute_batch(
             "ALTER TABLE files ADD COLUMN instability REAL DEFAULT 0.0;
-             ALTER TABLE files ADD COLUMN structure TEXT DEFAULT '';",
+             ALTER TABLE files ADD COLUMN structure TEXT DEFAULT '';
+             DROP INDEX IF EXISTS idx_files_path;
+             CREATE INDEX IF NOT EXISTS idx_files_snapshot_path ON files(snapshot_id, path);",
         )?;
         conn.pragma_update(None, "user_version", 2)?;
     }

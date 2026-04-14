@@ -1105,14 +1105,16 @@ fn run_query(args: &QueryArgs) -> Result<()> {
             let search = if query_arg.is_empty() { "%" } else { query_arg };
             let pattern = format!("%{}%", search);
             let mut stmt = conn.prepare(
-                "SELECT p.path, f.path, f.pagerank, f.in_degree, f.dependents, f.churn_risk
-                 FROM files f
-                 JOIN snapshots s ON f.snapshot_id = s.id
-                 JOIN projects p ON s.project_id = p.id
-                 WHERE s.id = (SELECT MAX(s2.id) FROM snapshots s2 WHERE s2.project_id = p.id)
-                 AND f.path LIKE ?1
-                 ORDER BY f.pagerank DESC
-                 LIMIT ?2",
+                "WITH latest AS (
+                    SELECT project_id, MAX(id) AS snap_id FROM snapshots GROUP BY project_id
+                )
+                SELECT p.path, f.path, f.pagerank, f.in_degree, f.dependents, f.churn_risk
+                FROM latest l
+                JOIN projects p ON p.id = l.project_id
+                JOIN files f ON f.snapshot_id = l.snap_id
+                WHERE f.path LIKE ?1
+                ORDER BY f.pagerank DESC
+                LIMIT ?2",
             )?;
             println!(
                 "{:>10}  {:>3}  {:>5}  {:>8}  {:<35}  {}",
@@ -1210,12 +1212,15 @@ fn run_query(args: &QueryArgs) -> Result<()> {
         }
         "projects" => {
             let mut stmt = conn.prepare(
-                "SELECT p.path, p.ecosystem, s.node_count, s.edge_count, s.cycle_count,
-                        s.git_rev, datetime(s.analyzed_at, 'unixepoch', 'localtime') as analyzed
-                 FROM projects p
-                 JOIN snapshots s ON s.project_id = p.id
-                 WHERE s.id = (SELECT MAX(s2.id) FROM snapshots s2 WHERE s2.project_id = p.id)
-                 ORDER BY s.analyzed_at DESC",
+                "WITH latest AS (
+                    SELECT project_id, MAX(id) AS snap_id FROM snapshots GROUP BY project_id
+                )
+                SELECT p.path, p.ecosystem, s.node_count, s.edge_count, s.cycle_count,
+                       s.git_rev, datetime(s.analyzed_at, 'unixepoch', 'localtime') as analyzed
+                FROM latest l
+                JOIN projects p ON p.id = l.project_id
+                JOIN snapshots s ON s.id = l.snap_id
+                ORDER BY s.analyzed_at DESC",
             )?;
             println!(
                 "{:<40}  {:>5}  {:>5}  {:>3}  {:<8}  {:<9}  {}",
