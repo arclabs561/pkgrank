@@ -1664,8 +1664,9 @@ pub(crate) struct FileRow {
     /// Files that most frequently change in the same commit (temporal coupling).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub co_changers: Vec<(String, usize)>,
-    /// Structural role: "foundation" (high in, low out), "hub" (high both),
-    /// "consumer" (low in, high out), "leaf" (low both).
+    /// Instability: out_degree / (in_degree + out_degree). 0 = stable, 1 = unstable.
+    pub instability: f64,
+    /// Structural role + stability-volatility quadrant.
     pub structure: String,
     /// External packages this file imports (ecosystem-level deps).
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -2320,6 +2321,11 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
                 commits,
                 churn_risk,
                 co_changers,
+                instability: if in_degree + out_degree > 0 {
+                    out_degree as f64 / (in_degree + out_degree) as f64
+                } else {
+                    0.0
+                },
                 structure: String::new(), // filled below
                 external_deps: ext_deps,
             }
