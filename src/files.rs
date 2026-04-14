@@ -1028,6 +1028,20 @@ fn detect_python_packages(root: &Path) -> Vec<(String, PathBuf)> {
         }
     }
 
+    // Check pyproject.toml for project name and look for matching dir (namespace packages).
+    if packages.is_empty() {
+        if let Some(project_name) = read_pyproject_name(root) {
+            let normalized = project_name.replace('-', "_");
+            // Check common locations.
+            for candidate in [root.join("src").join(&normalized), root.join(&normalized)] {
+                if candidate.is_dir() {
+                    packages.push((normalized.clone(), candidate));
+                    break;
+                }
+            }
+        }
+    }
+
     // Fallback: treat root as the package.
     if packages.is_empty() {
         let name = root
@@ -1042,6 +1056,16 @@ fn detect_python_packages(root: &Path) -> Vec<(String, PathBuf)> {
 }
 
 /// Backward-compatible wrapper for single-package detection.
+fn read_pyproject_name(root: &Path) -> Option<String> {
+    let pyproject = root.join("pyproject.toml");
+    let raw = std::fs::read_to_string(&pyproject).ok()?;
+    let val: toml::Value = toml::from_str(&raw).ok()?;
+    val.get("project")
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+        .map(|s| s.to_string())
+}
+
 fn detect_python_package(root: &Path) -> (String, PathBuf) {
     detect_python_packages(root)
         .into_iter()
@@ -1082,7 +1106,7 @@ fn parse_python_from_import(
 ) -> Option<Vec<PathBuf>> {
     // `from .foo import bar` or `from ..foo import bar` or `from pkg.foo import bar`
     let rest = line.strip_prefix("from ")?;
-    let (module_part, _) = rest.split_once(" import ")?;
+    let (module_part, import_names) = rest.split_once(" import ")?;
     let module_part = module_part.trim();
 
     let resolved = if module_part.starts_with('.') {
@@ -1114,6 +1138,18 @@ fn parse_python_from_import(
 
     let mut targets = Vec::new();
     resolve_python_path(&resolved, mod_to_file, &mut targets);
+
+    // Also try each imported name as a submodule:
+    // `from pkg.utils import helpers` → try `pkg.utils.helpers` as a module.
+    for name in import_names.split(',') {
+        let name = name.trim().split(" as ").next().unwrap_or("").trim();
+        if name.is_empty() || name == "*" {
+            continue;
+        }
+        let submod = format!("{}.{}", resolved, name);
+        resolve_python_path(&submod, mod_to_file, &mut targets);
+    }
+
     if targets.is_empty() {
         None
     } else {
