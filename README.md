@@ -163,16 +163,30 @@ pkgrank files . --cache
 ```
 
 Output includes:
-- **PageRank / betweenness / consumers PageRank** per file
+- **Structural role**: foundation (high in, low out), hub (high both), consumer (low in, high out), leaf
+- **Instability**: `I = out/(in+out)`, 0 = stable provider, 1 = unstable consumer
 - **Blast radius**: transitive dependents (how many files break if this one changes)
 - **Cycle detection**: Tarjan's SCC, files in cycles marked with `*`
 - **Orphan detection**: files with no imports and no dependents
-- **Churn risk** (`--git`): structural centrality * change frequency
+- **Churn risk** (`--git`): structural centrality * change frequency. Files marked `!!` are in the danger zone (central + volatile)
+- **Bus factor** (`--git`): unique contributors per file
 - **Co-change coupling** (`--git`): files that change together in commits
+- **Layer violations**: detects when stable files import from unstable files (Clean Architecture dependency rule)
 - **External deps**: which third-party packages each file imports
-- **Hubs / entry points**: architectural summary
 
-For JS/TS projects, resolves tsconfig.json path aliases (`@/`, etc.) and npm workspace packages (`@scope/pkg`).
+Cross-project analysis via SQLite (auto-enabled):
+
+```bash
+# Query across all previously analyzed projects
+pkgrank query hotspots          # highest churn risk files
+pkgrank query deps              # most-used external deps
+pkgrank query projects          # list all analyzed projects
+pkgrank query "files lib.rs"    # search for files by name
+pkgrank query compare           # diff between last two snapshots
+pkgrank query drift             # centrality changes over time
+```
+
+For JS/TS projects, resolves tsconfig.json path aliases (`@/`, etc.) and npm workspace packages (`@scope/pkg`). Detects cross-language seams (PyO3, NAPI) between Rust and Python/JS.
 
 ## Polyglot analysis (npm, Python, Go)
 
