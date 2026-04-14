@@ -1577,6 +1577,9 @@ pub(crate) struct FileRow {
     pub commits: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub churn_risk: Option<f64>,
+    /// Files that most frequently change in the same commit (temporal coupling).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub co_changers: Vec<(String, usize)>,
     /// External packages this file imports (ecosystem-level deps).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub external_deps: Vec<String>,
@@ -1604,27 +1607,84 @@ pub(crate) struct FilesResult {
 // ---------------------------------------------------------------------------
 
 /// Parse git log to get per-file commit counts within a time window.
-fn git_file_commit_counts(root: &Path, days: u64) -> HashMap<String, usize> {
+struct GitStats {
+    /// Per-file commit counts.
+    counts: HashMap<String, usize>,
+    /// Top co-changers per file: files that most frequently change in the same commit.
+    co_changers: HashMap<String, Vec<(String, usize)>>,
+}
+
+fn git_file_stats(root: &Path, days: u64) -> GitStats {
     let since = format!("--since={} days ago", days);
+    // Use %x00 as commit separator so we can group files per commit.
     let out = ProcessCommand::new("git")
-        .args(["log", "--name-only", "--pretty=format:", &since])
+        .args(["log", "--name-only", "--pretty=format:%x00", &since])
         .current_dir(root)
         .output();
     let out = match out {
         Ok(o) if o.status.success() => o,
-        _ => return HashMap::new(),
+        _ => {
+            return GitStats {
+                counts: HashMap::new(),
+                co_changers: HashMap::new(),
+            }
+        }
     };
     let stdout = String::from_utf8_lossy(&out.stdout);
 
     let mut counts: HashMap<String, usize> = HashMap::new();
-    for line in stdout.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
+    let mut pair_counts: HashMap<(String, String), usize> = HashMap::new();
+
+    // Split by commit separator.
+    for commit_block in stdout.split('\0') {
+        let files: Vec<&str> = commit_block
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .collect();
+
+        for &f in &files {
+            *counts.entry(f.to_string()).or_insert(0) += 1;
         }
-        *counts.entry(line.to_string()).or_insert(0) += 1;
+
+        // Co-change pairs (only for commits with 2-20 files to avoid noise).
+        if files.len() >= 2 && files.len() <= 20 {
+            for i in 0..files.len() {
+                for j in (i + 1)..files.len() {
+                    let (a, b) = if files[i] < files[j] {
+                        (files[i].to_string(), files[j].to_string())
+                    } else {
+                        (files[j].to_string(), files[i].to_string())
+                    };
+                    *pair_counts.entry((a, b)).or_insert(0) += 1;
+                }
+            }
+        }
     }
-    counts
+
+    // Build top co-changers per file (top 5).
+    let mut co_changers: HashMap<String, Vec<(String, usize)>> = HashMap::new();
+    for ((a, b), count) in &pair_counts {
+        if *count >= 2 {
+            co_changers
+                .entry(a.clone())
+                .or_default()
+                .push((b.clone(), *count));
+            co_changers
+                .entry(b.clone())
+                .or_default()
+                .push((a.clone(), *count));
+        }
+    }
+    for partners in co_changers.values_mut() {
+        partners.sort_by(|a, b| b.1.cmp(&a.1));
+        partners.truncate(5);
+    }
+
+    GitStats {
+        counts,
+        co_changers,
+    }
 }
 
 /// Clone a git URL to a temp directory. Returns the path.
@@ -1919,12 +1979,15 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
     }
 
     // Git history (optional).
-    let git_counts: HashMap<String, usize> = if args.git {
-        git_file_commit_counts(&root, args.git_days)
+    let git_stats = if args.git {
+        git_file_stats(&root, args.git_days)
     } else {
-        HashMap::new()
+        GitStats {
+            counts: HashMap::new(),
+            co_changers: HashMap::new(),
+        }
     };
-    let max_commits = git_counts.values().copied().max().unwrap_or(1).max(1) as f64;
+    let max_commits = git_stats.counts.values().copied().max().unwrap_or(1).max(1) as f64;
 
     let mut rows: Vec<FileRow> = (0..av.node_count)
         .map(|i| {
@@ -1942,7 +2005,8 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
             let commits = if args.git {
                 if args.directory {
                     Some(
-                        git_counts
+                        git_stats
+                            .counts
                             .iter()
                             .filter(|(path, _)| {
                                 Path::new(path)
@@ -1957,12 +2021,17 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
                             .sum::<usize>(),
                     )
                 } else {
-                    Some(git_counts.get(&rel).copied().unwrap_or(0))
+                    Some(git_stats.counts.get(&rel).copied().unwrap_or(0))
                 }
             } else {
                 None
             };
             let churn_risk = commits.map(|c| av.pr[i] * (c as f64 / max_commits));
+            let co_changers = if args.git {
+                git_stats.co_changers.get(&rel).cloned().unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             let ext_deps = if args.directory {
                 Vec::new()
             } else {
@@ -1984,6 +2053,7 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
                 cycle_id,
                 commits,
                 churn_risk,
+                co_changers,
                 external_deps: ext_deps,
             }
         })
@@ -2200,6 +2270,14 @@ fn print_focus(query: &str, result: &FilesResult) {
                 cid,
                 result.cycles.get(cid).map(|c| c.len()).unwrap_or(0)
             );
+        }
+
+        // Co-changers (temporal coupling from git history).
+        if !row.co_changers.is_empty() {
+            println!("  co-changes with ({}):", row.co_changers.len());
+            for (partner, count) in &row.co_changers {
+                println!("    ~{} {}", count, partner);
+            }
         }
 
         // Direct imports (this file depends on).
