@@ -2345,19 +2345,50 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
             outs[outs.len() / 2]
         }
     };
+    // Stability-volatility quadrant (when git data available).
+    let median_churn = if args.git {
+        let mut churns: Vec<f64> = rows
+            .iter()
+            .filter_map(|r| r.churn_risk)
+            .filter(|c| *c > 0.0)
+            .collect();
+        churns.sort_by(|a, b| a.total_cmp(b));
+        if churns.is_empty() {
+            0.0
+        } else {
+            churns[churns.len() / 2]
+        }
+    } else {
+        0.0
+    };
+
     for row in &mut rows {
-        row.structure = match (row.in_degree > median_in, row.out_degree > median_out) {
-            (true, false) => "foundation".to_string(), // many depend on me, I depend on few
-            (true, true) => "hub".to_string(),         // many depend on me AND I depend on many
-            (false, true) => "consumer".to_string(),   // few depend on me, I depend on many
+        let base = match (row.in_degree > median_in, row.out_degree > median_out) {
+            (true, false) => "foundation",
+            (true, true) => "hub",
+            (false, true) => "consumer",
             (false, false) => {
                 if row.orphan {
-                    "orphan".to_string()
+                    "orphan"
                 } else {
-                    "leaf".to_string()
+                    "leaf"
                 }
             }
         };
+
+        // When git data is available, overlay stability-volatility quadrant.
+        if args.git && row.churn_risk.unwrap_or(0.0) > 0.0 {
+            let is_volatile = row.churn_risk.unwrap_or(0.0) > median_churn;
+            let is_central = row.in_degree > median_in;
+            row.structure = match (is_central, is_volatile) {
+                (true, true) => format!("{}!!", base), // danger zone
+                (true, false) => format!("{}", base),  // load-bearing (stable)
+                (false, true) => format!("{}~", base), // volatile but low-risk
+                (false, false) => base.to_string(),    // stable leaf
+            };
+        } else {
+            row.structure = base.to_string();
+        }
     }
 
     if args.git && matches!(args.metric, Metric::Pagerank) {
@@ -2520,9 +2551,35 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                 println!("\nhubs (most depended-on):");
                 for r in by_in.iter().take(3) {
                     println!(
-                        "  {} ({} dependents, blast={})",
-                        r.file, r.in_degree, r.dependents
+                        "  {} ({} dependents, blast={}, {})",
+                        r.file, r.in_degree, r.dependents, r.structure
                     );
+                }
+
+                // Structure distribution.
+                let mut struct_counts: HashMap<&str, usize> = HashMap::new();
+                for r in &result.rows {
+                    // Take base structure (strip !! and ~ suffixes).
+                    let base = r.structure.trim_end_matches('!').trim_end_matches('~');
+                    *struct_counts.entry(base).or_insert(0) += 1;
+                }
+                let danger_count = result
+                    .rows
+                    .iter()
+                    .filter(|r| r.structure.contains("!!"))
+                    .count();
+                if !struct_counts.is_empty() {
+                    let parts: Vec<String> = struct_counts
+                        .iter()
+                        .map(|(k, v)| format!("{}: {}", k, v))
+                        .collect();
+                    println!("\nstructure: {}", parts.join(", "));
+                    if danger_count > 0 {
+                        println!(
+                            "  {} files in danger zone (central + volatile)",
+                            danger_count
+                        );
+                    }
                 }
 
                 // Leaves (highest out-degree, lowest in-degree) -- entry points/consumers.
