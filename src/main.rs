@@ -41,6 +41,8 @@ pub(crate) use polyglot::*;
 mod files;
 pub(crate) use files::*;
 
+mod store;
+
 mod upgrade_priority;
 pub(crate) use upgrade_priority::*;
 

@@ -1499,6 +1499,7 @@ impl PkgrankStdioMcpFull {
             focus: None,
             git: false,
             git_days: 90,
+            store: false,
         };
         let result =
             files_analyze(&args).map_err(|e| McpError::internal_error(format!("{:#}", e), None))?;

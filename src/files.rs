@@ -67,6 +67,10 @@ pub(crate) struct FilesArgs {
     /// Git history window in days (default: 90).
     #[arg(long, default_value_t = 90)]
     pub git_days: u64,
+
+    /// Persist results to SQLite database for cross-project queries.
+    #[arg(long, default_value_t = false)]
+    pub store: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -2393,6 +2397,27 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                 if result.cycles.len() > 5 {
                     println!("  ... (+{} more cycles)", result.cycles.len() - 5);
                 }
+            }
+        }
+    }
+
+    // Persist to SQLite if --store.
+    if args.store {
+        let db_path = crate::store::default_db_path();
+        match crate::store::open_db(&db_path) {
+            Ok(conn) => {
+                let project_path = args.path.clone();
+                match crate::store::store_snapshot(&conn, &project_path, &result) {
+                    Ok(snap_id) => {
+                        eprintln!("stored snapshot {} in {}", snap_id, db_path.display());
+                    }
+                    Err(e) => {
+                        eprintln!("warning: failed to store snapshot: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("warning: failed to open db: {}", e);
             }
         }
     }
