@@ -106,6 +106,8 @@ enum Command {
     UpgradePriority(UpgradePriorityArgs),
     /// Analyze a non-Cargo lock file (npm, Python uv.lock, Go go.mod).
     Polyglot(PolyglotArgs),
+    /// Query the persistent SQLite store (populated by `pkgrank files --store`).
+    Query(QueryArgs),
     /// Analyze file-level import graph within a single project.
     ///
     /// Static import parsing (no toolchain required). Auto-detects ecosystem.
@@ -858,6 +860,7 @@ fn main() -> Result<()> {
         Some(Command::UpgradePriority(args)) => ("upgrade-priority", run_upgrade_priority(&args)),
         Some(Command::Polyglot(args)) => ("polyglot", run_polyglot(&args)),
         Some(Command::Files(args)) => ("files", run_files(&args)),
+        Some(Command::Query(args)) => ("query", run_query(&args)),
         Some(Command::McpStdio) => ("mcp-stdio", run_mcp_stdio()),
     };
 
@@ -1047,6 +1050,116 @@ fn run_mcp_stdio() -> Result<()> {
             "mcp-stdio requires compile-time feature `stdio` (rebuild: cargo build -p pkgrank --features stdio)"
         );
     }
+}
+
+#[derive(Parser, Debug, Clone)]
+pub(crate) struct QueryArgs {
+    /// What to query: "hotspots", "deps", "projects", or a raw SQL query.
+    #[arg(default_value = "hotspots")]
+    pub what: String,
+
+    /// Limit results.
+    #[arg(short = 'n', long, default_value_t = 15)]
+    pub top: usize,
+}
+
+fn run_query(args: &QueryArgs) -> Result<()> {
+    let db_path = store::default_db_path();
+    let conn = store::open_db(&db_path).with_context(|| {
+        format!(
+            "no store at {}. Run `pkgrank files --store` first.",
+            db_path.display()
+        )
+    })?;
+
+    match args.what.as_str() {
+        "hotspots" => {
+            let rows = store::query_top_churn(&conn, args.top)?;
+            if rows.is_empty() {
+                println!("no hotspots found (run `pkgrank files --store --git` to populate)");
+                return Ok(());
+            }
+            println!("{:>8}  {:<40}  {}", "churn", "file", "project");
+            println!("{:\u{2500}<80}", "");
+            for (project, file, churn) in &rows {
+                println!("{:>8.6}  {:<40}  {}", churn, file, project);
+            }
+        }
+        "deps" => {
+            let rows = store::query_top_deps(&conn, args.top)?;
+            if rows.is_empty() {
+                println!("no deps found (run `pkgrank files --store` to populate)");
+                return Ok(());
+            }
+            println!("{:>5}  {}", "projs", "package");
+            println!("{:\u{2500}<40}", "");
+            for (dep, count) in &rows {
+                println!("{:>5}  {}", count, dep);
+            }
+        }
+        "projects" => {
+            let mut stmt = conn.prepare(
+                "SELECT p.path, p.ecosystem, s.node_count, s.edge_count, s.cycle_count,
+                        datetime(s.analyzed_at, 'unixepoch', 'localtime') as analyzed
+                 FROM projects p
+                 JOIN snapshots s ON s.project_id = p.id
+                 WHERE s.id = (SELECT MAX(s2.id) FROM snapshots s2 WHERE s2.project_id = p.id)
+                 ORDER BY s.analyzed_at DESC",
+            )?;
+            println!(
+                "{:<45}  {:>5}  {:>5}  {:>3}  {:<8}  {}",
+                "project", "files", "edges", "cyc", "eco", "analyzed"
+            );
+            println!("{:\u{2500}<95}", "");
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let path: String = row.get(0)?;
+                let eco: String = row.get(1)?;
+                let nodes: i64 = row.get(2)?;
+                let edges: i64 = row.get(3)?;
+                let cycles: i64 = row.get(4)?;
+                let analyzed: String = row.get(5)?;
+                let short = if path.len() > 45 {
+                    &path[path.len() - 45..]
+                } else {
+                    &path
+                };
+                println!(
+                    "{:<45}  {:>5}  {:>5}  {:>3}  {:<8}  {}",
+                    short, nodes, edges, cycles, eco, analyzed
+                );
+            }
+        }
+        other => {
+            // Raw SQL query.
+            let mut stmt = conn
+                .prepare(other)
+                .with_context(|| format!("invalid SQL: {}", other))?;
+            let col_count = stmt.column_count();
+            let names: Vec<String> = (0..col_count)
+                .map(|i| stmt.column_name(i).unwrap_or("?").to_string())
+                .collect();
+            println!("{}", names.join("\t"));
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let vals: Vec<String> = (0..col_count)
+                    .map(|i| {
+                        row.get::<_, String>(i).unwrap_or_else(|_| {
+                            row.get::<_, f64>(i)
+                                .map(|v| format!("{:.4}", v))
+                                .unwrap_or_else(|_| {
+                                    row.get::<_, i64>(i)
+                                        .map(|v| v.to_string())
+                                        .unwrap_or_else(|_| "NULL".to_string())
+                                })
+                        })
+                    })
+                    .collect();
+                println!("{}", vals.join("\t"));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn manifest_path(path: &Path) -> Result<PathBuf> {
