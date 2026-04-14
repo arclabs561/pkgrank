@@ -1000,8 +1000,8 @@ fn resolve_python_path(path: &str, mod_to_file: &HashMap<String, PathBuf>, out: 
 fn parse_js_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
     let mut edges = Vec::new();
 
-    // Build a set of known files for resolution.
     let file_set: HashSet<PathBuf> = files.iter().cloned().collect();
+    let path_aliases = read_tsconfig_paths(root);
 
     for file in files {
         let content = match std::fs::read_to_string(file) {
@@ -1014,16 +1014,28 @@ fn parse_js_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
         for line in content.lines() {
             let line = line.trim();
 
-            // ESM: `import ... from './foo'` or `import './foo'`
-            // CJS: `require('./foo')`
-            // Dynamic: `import('./foo')`
             for spec in extract_js_import_specifiers(line) {
-                // Only resolve relative imports (intra-project).
-                if !spec.starts_with('.') {
+                let (resolve_dir, resolve_spec_owned);
+                if spec.starts_with('.') {
+                    resolve_dir = dir;
+                    resolve_spec_owned = spec;
+                } else if let Some(abs_path) = resolve_alias_to_path(&spec, &path_aliases) {
+                    // Alias resolved to absolute path -- resolve relative to root.
+                    resolve_dir = root;
+                    resolve_spec_owned = format!(
+                        "./{}",
+                        abs_path
+                            .strip_prefix(root)
+                            .unwrap_or(&abs_path)
+                            .to_string_lossy()
+                    );
+                } else {
                     continue;
-                }
+                };
 
-                if let Some(resolved) = resolve_js_import(dir, &spec, &file_set) {
+                if let Some(resolved) =
+                    resolve_js_import(resolve_dir, &resolve_spec_owned, &file_set)
+                {
                     if resolved != *file {
                         edges.push(FileEdge {
                             from: file.clone(),
@@ -1036,6 +1048,78 @@ fn parse_js_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
     }
 
     edges
+}
+
+/// Read path aliases from tsconfig.json / jsconfig.json.
+/// Returns Vec<(prefix, replacement_dir)>, e.g. ("@/", "./src/").
+fn read_tsconfig_paths(root: &Path) -> Vec<(String, PathBuf)> {
+    let candidates = ["tsconfig.json", "jsconfig.json"];
+    for name in &candidates {
+        let path = root.join(name);
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            // Strip single-line comments (tsconfig allows them).
+            let cleaned: String = raw
+                .lines()
+                .map(|l| {
+                    if let Some(pos) = l.find("//") {
+                        &l[..pos]
+                    } else {
+                        l
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&cleaned) {
+                return extract_path_aliases(&val, root);
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn extract_path_aliases(tsconfig: &serde_json::Value, root: &Path) -> Vec<(String, PathBuf)> {
+    let mut aliases = Vec::new();
+
+    let base_url = tsconfig
+        .get("compilerOptions")
+        .and_then(|c| c.get("baseUrl"))
+        .and_then(|b| b.as_str())
+        .unwrap_or(".");
+    let base_dir = root.join(base_url);
+
+    if let Some(paths) = tsconfig
+        .get("compilerOptions")
+        .and_then(|c| c.get("paths"))
+        .and_then(|p| p.as_object())
+    {
+        for (pattern, targets) in paths {
+            // Pattern like "@/*" → strip the wildcard.
+            let prefix = pattern.trim_end_matches('*');
+            if let Some(first_target) = targets.as_array().and_then(|a| a.first()) {
+                if let Some(target_str) = first_target.as_str() {
+                    let target_path = target_str.trim_end_matches('*');
+                    let resolved = base_dir.join(target_path);
+                    aliases.push((prefix.to_string(), resolved));
+                }
+            }
+        }
+    }
+
+    // Common fallback: treat @/ as project root even without tsconfig.
+    if aliases.is_empty() {
+        aliases.push(("@/".to_string(), root.to_path_buf()));
+    }
+
+    aliases
+}
+
+fn resolve_alias_to_path(spec: &str, aliases: &[(String, PathBuf)]) -> Option<PathBuf> {
+    for (prefix, target_dir) in aliases {
+        if let Some(rest) = spec.strip_prefix(prefix.as_str()) {
+            return Some(target_dir.join(rest));
+        }
+    }
+    None
 }
 
 fn extract_js_import_specifiers(line: &str) -> Vec<String> {
@@ -1133,20 +1217,44 @@ fn resolve_js_import(dir: &Path, spec: &str, file_set: &HashSet<PathBuf>) -> Opt
 
 fn parse_go_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
     // Go imports are package-level (directory-based).
-    // Detect the module name from go.mod.
     let module_name = read_go_module_name(root);
 
-    // Map: package import path → list of files in that package.
+    // Map: package import path → canonical representative file.
+    // We pick one file per package to avoid N-edge fan-out.
+    // Preference: file named after package dir > doc.go > alphabetically first.
     let mut pkg_to_files: HashMap<String, Vec<PathBuf>> = HashMap::new();
-    let mut file_to_pkg: HashMap<PathBuf, String> = HashMap::new();
 
     for file in files {
         if let Some(pkg_path) = go_file_to_pkg_path(file, root, &module_name) {
-            pkg_to_files
-                .entry(pkg_path.clone())
-                .or_default()
-                .push(file.clone());
-            file_to_pkg.insert(file.clone(), pkg_path);
+            pkg_to_files.entry(pkg_path).or_default().push(file.clone());
+        }
+    }
+
+    let mut pkg_canonical: HashMap<String, PathBuf> = HashMap::new();
+    for (pkg, pkg_files) in &mut pkg_to_files {
+        pkg_files.sort();
+        // Pick canonical: package-name-matching file > first non-doc > first.
+        let pkg_leaf = pkg.rsplit('/').next().unwrap_or(pkg);
+        let canonical = pkg_files
+            .iter()
+            .find(|f| {
+                f.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s == pkg_leaf)
+                    .unwrap_or(false)
+            })
+            .or_else(|| {
+                pkg_files.iter().find(|f| {
+                    f.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| n != "doc.go")
+                        .unwrap_or(true)
+                })
+            })
+            .or(pkg_files.first())
+            .cloned();
+        if let Some(c) = canonical {
+            pkg_canonical.insert(pkg.clone(), c);
         }
     }
 
@@ -1161,21 +1269,17 @@ fn parse_go_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
         for line in content.lines() {
             let line = line.trim();
 
-            // `import "module/pkg/path"` or within import block.
             if let Some(import_path) = extract_go_import(line) {
-                // Only intra-module imports.
                 if !import_path.starts_with(&module_name) {
                     continue;
                 }
 
-                if let Some(target_files) = pkg_to_files.get(&import_path) {
-                    for target in target_files {
-                        if target != file {
-                            edges.push(FileEdge {
-                                from: file.clone(),
-                                to: target.clone(),
-                            });
-                        }
+                if let Some(target) = pkg_canonical.get(&import_path) {
+                    if target != file {
+                        edges.push(FileEdge {
+                            from: file.clone(),
+                            to: target.clone(),
+                        });
                     }
                 }
             }
