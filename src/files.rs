@@ -394,7 +394,6 @@ fn parse_rust_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
             .cloned()
             .unwrap_or_else(|| "crate".to_string());
 
-        // Join multi-line use/mod statements into logical lines.
         let logical_lines = join_rust_logical_lines(&content);
 
         for line in &logical_lines {
