@@ -257,8 +257,6 @@ fn should_include(role: FileRole, args: &FilesArgs) -> bool {
 
 pub(crate) fn detect_ecosystem(dir: &Path) -> Option<Ecosystem> {
     // Priority: Cargo > Go > Python > npm.
-    // Cargo first because Rust projects often have package.json for tooling.
-    // Go before Python because go.mod is unambiguous.
     if dir.join("Cargo.toml").exists() {
         return Some(Ecosystem::Cargo);
     }
@@ -271,10 +269,40 @@ pub(crate) fn detect_ecosystem(dir: &Path) -> Option<Ecosystem> {
     {
         return Some(Ecosystem::Python);
     }
-    if dir.join("package.json").exists() || dir.join("package-lock.json").exists() {
+    if dir.join("package.json").exists()
+        || dir.join("package-lock.json").exists()
+        || dir.join("deno.json").exists()
+        || dir.join("deno.jsonc").exists()
+    {
         return Some(Ecosystem::Npm);
     }
     None
+}
+
+/// Detect all ecosystems present in a directory.
+pub(crate) fn detect_all_ecosystems(dir: &Path) -> Vec<Ecosystem> {
+    let mut ecosystems = Vec::new();
+    if dir.join("Cargo.toml").exists() {
+        ecosystems.push(Ecosystem::Cargo);
+    }
+    if dir.join("go.mod").exists() {
+        ecosystems.push(Ecosystem::Go);
+    }
+    if dir.join("pyproject.toml").exists()
+        || dir.join("uv.lock").exists()
+        || dir.join("setup.py").exists()
+    {
+        ecosystems.push(Ecosystem::Python);
+    }
+    if dir.join("package.json").exists()
+        || dir.join("package-lock.json").exists()
+        || dir.join("deno.json").exists()
+        || dir.join("deno.jsonc").exists()
+        || dir.join("import_map.json").exists()
+    {
+        ecosystems.push(Ecosystem::Npm);
+    }
+    ecosystems
 }
 
 // ---------------------------------------------------------------------------
@@ -1898,17 +1926,28 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
         }
     };
 
-    let ecosystem = args
-        .ecosystem
-        .or_else(|| detect_ecosystem(&root))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
+    // Determine ecosystem(s) to analyze.
+    let ecosystems: Vec<Ecosystem> = if let Some(eco) = args.ecosystem {
+        vec![eco]
+    } else {
+        let detected = detect_all_ecosystems(&root);
+        if detected.is_empty() {
+            return Err(anyhow::anyhow!(
                 "Could not detect ecosystem in {}. Pass --ecosystem explicitly.",
                 root.display()
-            )
-        })?;
+            ));
+        }
+        detected
+    };
+    let ecosystem = ecosystems[0]; // Primary ecosystem for display.
 
-    let all_files = discover_files(&root, ecosystem);
+    // Discover files across all detected ecosystems.
+    let mut all_files = Vec::new();
+    for eco in &ecosystems {
+        all_files.extend(discover_files(&root, *eco));
+    }
+    all_files.sort();
+    all_files.dedup();
 
     // Cache check: use file paths + mtimes as cache key.
     let cache_dir = root.join("evals/pkgrank/files_cache");
@@ -1930,43 +1969,63 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
         }
     }
 
-    let edges = match ecosystem {
-        Ecosystem::Cargo => parse_rust_imports(&root, &included_files),
-        Ecosystem::Python => parse_python_imports(&root, &included_files),
-        Ecosystem::Npm => parse_js_imports(&root, &included_files),
-        Ecosystem::Go => parse_go_imports(&root, &included_files),
-    };
+    // Parse imports for each ecosystem and merge edges.
+    let mut edges = Vec::new();
+    for eco in &ecosystems {
+        let eco_files: Vec<PathBuf> = included_files
+            .iter()
+            .filter(|f| {
+                let ext = f.extension().and_then(|e| e.to_str()).unwrap_or("");
+                match eco {
+                    Ecosystem::Cargo => ext == "rs",
+                    Ecosystem::Python => ext == "py",
+                    Ecosystem::Npm => matches!(ext, "ts" | "tsx" | "js" | "jsx" | "mjs"),
+                    Ecosystem::Go => ext == "go",
+                }
+            })
+            .cloned()
+            .collect();
+        let eco_edges = match eco {
+            Ecosystem::Cargo => parse_rust_imports(&root, &eco_files),
+            Ecosystem::Python => parse_python_imports(&root, &eco_files),
+            Ecosystem::Npm => parse_js_imports(&root, &eco_files),
+            Ecosystem::Go => parse_go_imports(&root, &eco_files),
+        };
+        edges.extend(eco_edges);
+    }
 
     // Extract external dependency names per file.
     let mut internal_prefixes: HashSet<String> = HashSet::new();
-    match ecosystem {
-        Ecosystem::Cargo => {
-            let crate_roots = find_rust_crate_roots(&root);
-            for (_, name) in &crate_roots {
-                internal_prefixes.insert(name.clone());
-            }
-            // Also add all known module names (from mod declarations) as internal.
-            for file in &included_files {
-                if let Ok(content) = std::fs::read_to_string(file) {
-                    for line in content.lines() {
-                        if let Some(mod_name) = parse_mod_declaration(line.trim()) {
-                            internal_prefixes.insert(mod_name);
+    for eco in &ecosystems {
+        match eco {
+            Ecosystem::Cargo => {
+                let crate_roots = find_rust_crate_roots(&root);
+                for (_, name) in &crate_roots {
+                    internal_prefixes.insert(name.clone());
+                }
+                // Also add all known module names (from mod declarations) as internal.
+                for file in &included_files {
+                    if let Ok(content) = std::fs::read_to_string(file) {
+                        for line in content.lines() {
+                            if let Some(mod_name) = parse_mod_declaration(line.trim()) {
+                                internal_prefixes.insert(mod_name);
+                            }
                         }
                     }
                 }
             }
-        }
-        Ecosystem::Python => {
-            let (pkg_name, _) = detect_python_package(&root);
-            internal_prefixes.insert(pkg_name);
-        }
-        Ecosystem::Go => {
-            let mod_name = read_go_module_name(&root);
-            if !mod_name.is_empty() {
-                internal_prefixes.insert(mod_name);
+            Ecosystem::Python => {
+                let (pkg_name, _) = detect_python_package(&root);
+                internal_prefixes.insert(pkg_name);
             }
+            Ecosystem::Go => {
+                let mod_name = read_go_module_name(&root);
+                if !mod_name.is_empty() {
+                    internal_prefixes.insert(mod_name);
+                }
+            }
+            Ecosystem::Npm => {} // JS doesn't have a simple internal prefix
         }
-        Ecosystem::Npm => {} // JS doesn't have a simple internal prefix
     }
     let external_deps_map = extract_external_deps(&included_files, ecosystem, &internal_prefixes);
 
