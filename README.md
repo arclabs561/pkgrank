@@ -2,7 +2,9 @@
 
 `pkgrank` ranks nodes in a dependency graph using centrality metrics.
 
-Currently supports Cargo workspaces; designed to extend to other ecosystems (npm, PyPI, Go modules).
+Two modes: **inter-package** (which crates/packages in your dependency tree are most central?) and **intra-project** (which files in your codebase are structurally central, hotspots, or forming cycles?)
+
+Supports Cargo, npm, Python, and Go. Works on local paths or GitHub URLs.
 
 ## Install
 
@@ -16,7 +18,8 @@ pkgrank --help
 pkgrank answers two structurally different questions:
 
 - **Inter-package centrality** (`analyze`, `sweep-local`, `triage`, `cratesio`): which packages in a workspace are most central, most depended-on, most risky to change?
-- **Intra-package centrality** (`modules`, `modules-sweep`): which files, modules, or items *inside* a package are the coupling hotspots?
+- **Intra-project file centrality** (`files`): which files in your codebase are structurally central? Includes cycle detection, blast radius, churn risk from git history, and orphan detection. Polyglot (Rust/Python/JS/Go), works on any GitHub URL.
+- **Intra-package item centrality** (`modules`, `modules-sweep`): which modules or items *inside* a Rust package are the coupling hotspots? (Requires `cargo-modules`.)
 
 Both use the same metrics (PageRank, consumer PageRank, betweenness, degree) applied to different graphs.
 
@@ -35,7 +38,21 @@ pkgrank blast-radius serde --workspace-only=false
 # Upgrade priority: which outdated deps matter most?
 pkgrank upgrade-priority
 
-# Intra-package: file-level coupling hotspots inside a crate
+# File-level: structural hotspots in any project (no toolchain needed)
+pkgrank files .
+pkgrank files tokio-rs/tokio
+pkgrank files https://github.com/fastapi/fastapi --ecosystem python
+
+# File-level with git churn risk overlay
+pkgrank files . --git
+
+# Focus on a specific file
+pkgrank files . --focus main.rs
+
+# Directory-level aggregation for large codebases
+pkgrank files astral-sh/ruff --directory
+
+# Intra-package: item-level coupling hotspots (Rust only, needs cargo-modules)
 pkgrank modules --manifest-path ../Cargo.toml -p walk --lib -n 25
 
 # Polyglot: analyze an npm project
@@ -116,6 +133,46 @@ pkgrank upgrade-priority -n 15
 ```
 
 Requires [`cargo-outdated`](https://crates.io/crates/cargo-outdated) to be installed. Scores each outdated dep by `10*ln(dependents+1) + 1000*pagerank + urgency_bonus` where urgency is major/minor/patch.
+
+## File-level analysis (`pkgrank files`)
+
+Analyze the import graph within a project. Static parsing (no toolchain required). Works across Rust, Python, JS/TS, and Go.
+
+```bash
+# Any local project (ecosystem auto-detected)
+pkgrank files .
+
+# Any GitHub repo via URL or shorthand
+pkgrank files tokio-rs/tokio
+pkgrank files https://github.com/django/django --ecosystem python
+
+# Git churn risk: combine structural centrality with change frequency
+pkgrank files . --git
+
+# Focus on one file: see imports, dependents, co-changers, blast radius
+pkgrank files . --git --focus lib.rs
+
+# Directory aggregation for large codebases
+pkgrank files astral-sh/ruff --directory
+
+# Include test files (excluded by default)
+pkgrank files . --include-tests
+
+# Cache results for repeated queries
+pkgrank files . --cache
+```
+
+Output includes:
+- **PageRank / betweenness / consumers PageRank** per file
+- **Blast radius**: transitive dependents (how many files break if this one changes)
+- **Cycle detection**: Tarjan's SCC, files in cycles marked with `*`
+- **Orphan detection**: files with no imports and no dependents
+- **Churn risk** (`--git`): structural centrality * change frequency
+- **Co-change coupling** (`--git`): files that change together in commits
+- **External deps**: which third-party packages each file imports
+- **Hubs / entry points**: architectural summary
+
+For JS/TS projects, resolves tsconfig.json path aliases (`@/`, etc.) and npm workspace packages (`@scope/pkg`).
 
 ## Polyglot analysis (npm, Python, Go)
 
@@ -233,7 +290,7 @@ Environment (optional):
 Tools (high level):
 
 - Default (Cursor MCP): `pkgrank_view`, `pkgrank_triage`, `pkgrank_analyze`, `pkgrank_repo_detail`, `pkgrank_crate_detail`, `pkgrank_snapshot`, `pkgrank_compare_runs`, `pkgrank_blast_radius`
-- Advanced (opt-in: `PKGRANK_MCP_TOOLSET=full`): `pkgrank_status`, `pkgrank_modules`, `pkgrank_modules_sweep`, `pkgrank_upgrade_priority`, `pkgrank_polyglot`
+- Advanced (opt-in: `PKGRANK_MCP_TOOLSET=full`): `pkgrank_status`, `pkgrank_modules`, `pkgrank_modules_sweep`, `pkgrank_upgrade_priority`, `pkgrank_polyglot`, `pkgrank_files`
 - Debug (opt-in: `PKGRANK_MCP_TOOLSET=debug`): internal artifact-inspection tools (e.g. TLC tables, invariants list, PPR summaries)
 
 ## Analysis caching
@@ -285,7 +342,7 @@ If no `forbidden_edges` key is present, no invariant violations are reported.
 
 - **Security / advisory analysis**: no CVE, advisory, or vulnerability integration. Use `cargo audit` or `cargo deny`.
 - **Graph visualization**: output is ranked tables and JSON, not rendered graph images. Use `cargo-depgraph` or Graphviz for visual graphs.
-- **Circular dependency detection**: the graph is treated as a DAG for centrality computation. Cycles are not surfaced.
+- **Circular dependency breaking**: `pkgrank files` detects cycles (via Tarjan's SCC) but does not suggest how to break them.
 - **License compliance**: no license analysis or policy enforcement.
 - **Build / test / deploy**: pkgrank analyzes structure; it does not execute builds or tests.
 
@@ -300,7 +357,13 @@ If no `forbidden_edges` key is present, no invariant violations are reported.
 - **Dependency slimming**: "Why is this crate so central?"
   - Use: `pkgrank analyze --metric consumers-pagerank`
 - **Refactor hotspots inside a crate**: "Which files are the coupling hotspots?"
-  - Use: `pkgrank modules --aggregate file`
+  - Use: `pkgrank files .` or `pkgrank modules --aggregate file`
+- **Quick architectural overview of any repo**: "What does this codebase look like structurally?"
+  - Use: `pkgrank files owner/repo`
+- **Find hidden coupling**: "Which files change together even without direct imports?"
+  - Use: `pkgrank files . --git --focus myfile.rs`
+- **Cycle detection**: "Does this project have circular dependencies?"
+  - Use: `pkgrank files .` (cycles reported in summary)
 - **Polyglot analysis**: "Rank my npm/Python/Go deps by centrality."
   - Use: `pkgrank polyglot --ecosystem npm .`
 - **Shareable artifacts**: "Write an HTML snapshot I can point people at."
