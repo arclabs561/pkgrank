@@ -2290,18 +2290,45 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                 0.0
             };
             println!(
-                "\n{} files, {} edges, density={:.4}",
-                result.nodes, result.edges, density
-            );
-            println!(
-                "{} orphans, {} cycles",
+                "\n{} files, {} edges, density={:.4}, {} orphans, {} cycles",
+                result.nodes,
+                result.edges,
+                density,
                 result.orphan_count,
                 result.cycles.len()
             );
 
+            // Architectural insights.
+            if result.nodes > 3 {
+                // Hub files (top 3 by in-degree).
+                let mut by_in: Vec<&FileRow> = result.rows.iter().collect();
+                by_in.sort_by(|a, b| b.in_degree.cmp(&a.in_degree));
+                println!("\nhubs (most depended-on):");
+                for r in by_in.iter().take(3) {
+                    println!(
+                        "  {} ({} dependents, blast={})",
+                        r.file, r.in_degree, r.dependents
+                    );
+                }
+
+                // Leaves (highest out-degree, lowest in-degree) -- entry points/consumers.
+                let mut consumers: Vec<&FileRow> = result
+                    .rows
+                    .iter()
+                    .filter(|r| r.in_degree == 0 && r.out_degree > 0)
+                    .collect();
+                consumers.sort_by(|a, b| b.out_degree.cmp(&a.out_degree));
+                if !consumers.is_empty() {
+                    println!("\nentry points (no dependents, import others):");
+                    for r in consumers.iter().take(3) {
+                        println!("  {} (imports {})", r.file, r.out_degree);
+                    }
+                }
+            }
+
             if !result.cycles.is_empty() {
-                println!("\ncycles (* marks files in a cycle):");
-                for (i, cycle) in result.cycles.iter().enumerate() {
+                println!("\ncycles (* in table):");
+                for (i, cycle) in result.cycles.iter().take(5).enumerate() {
                     let preview: Vec<&str> = cycle.iter().take(5).map(|s| s.as_str()).collect();
                     let suffix = if cycle.len() > 5 {
                         format!(", ... (+{})", cycle.len() - 5)
@@ -2315,6 +2342,9 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                         preview.join(", "),
                         suffix
                     );
+                }
+                if result.cycles.len() > 5 {
+                    println!("  ... (+{} more cycles)", result.cycles.len() - 5);
                 }
             }
         }
