@@ -1,5 +1,6 @@
 use anyhow::Result;
 use rusqlite::{params, Connection};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -240,6 +241,99 @@ pub(crate) fn query_drift(
         .filter_map(|r| r.ok())
         .collect();
     Ok(rows)
+}
+
+/// Query: compare two snapshots of a project and show what changed.
+pub(crate) fn query_compare(
+    conn: &Connection,
+    project_path: &str,
+) -> Result<(Option<CompareResult>, Option<String>, Option<String>)> {
+    // Get last two snapshot IDs.
+    let mut stmt = conn.prepare(
+        "SELECT id, git_rev FROM snapshots WHERE project_id = (
+            SELECT id FROM projects WHERE path = ?1
+        ) ORDER BY analyzed_at DESC LIMIT 2",
+    )?;
+    let snaps: Vec<(i64, Option<String>)> = stmt
+        .query_map(params![project_path], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    if snaps.len() < 2 {
+        return Ok((None, None, None));
+    }
+
+    let (curr_id, curr_rev) = &snaps[0];
+    let (prev_id, prev_rev) = &snaps[1];
+
+    // Get file metrics for both snapshots.
+    let mut file_stmt = conn.prepare(
+        "SELECT path, pagerank, in_degree, dependents FROM files WHERE snapshot_id = ?1",
+    )?;
+
+    let curr: HashMap<String, (f64, i64, i64)> = file_stmt
+        .query_map(params![curr_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (row.get(1)?, row.get(2)?, row.get(3)?),
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let prev: HashMap<String, (f64, i64, i64)> = file_stmt
+        .query_map(params![prev_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (row.get(1)?, row.get(2)?, row.get(3)?),
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    // Find files that were added, removed, or changed PageRank.
+    let mut added: Vec<String> = Vec::new();
+    let mut removed: Vec<String> = Vec::new();
+    let mut changed: Vec<(String, f64, f64)> = Vec::new(); // (file, prev_pr, curr_pr)
+
+    for (file, (pr, _, _)) in &curr {
+        if let Some((prev_pr, _, _)) = prev.get(file) {
+            let delta = (pr - prev_pr).abs();
+            if delta > 1e-6 {
+                changed.push((file.clone(), *prev_pr, *pr));
+            }
+        } else {
+            added.push(file.clone());
+        }
+    }
+    for file in prev.keys() {
+        if !curr.contains_key(file) {
+            removed.push(file.clone());
+        }
+    }
+
+    changed.sort_by(|a, b| (b.2 - b.1).abs().total_cmp(&(a.2 - a.1).abs()));
+
+    Ok((
+        Some(CompareResult {
+            added,
+            removed,
+            changed,
+            curr_files: curr.len(),
+            prev_files: prev.len(),
+        }),
+        curr_rev.clone(),
+        prev_rev.clone(),
+    ))
+}
+
+#[derive(Debug)]
+pub(crate) struct CompareResult {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub changed: Vec<(String, f64, f64)>, // (file, prev_pr, curr_pr)
+    pub curr_files: usize,
+    pub prev_files: usize,
 }
 
 /// Query: most-used external dependencies across all projects.

@@ -1141,6 +1141,51 @@ fn run_query(args: &QueryArgs) -> Result<()> {
                 );
             }
         }
+        "compare" => {
+            let project = if query_arg.is_empty() { "." } else { query_arg };
+            let (result, curr_rev, prev_rev) = store::query_compare(&conn, project)?;
+            match result {
+                None => println!("need 2+ snapshots to compare (run `pkgrank files` twice)"),
+                Some(cmp) => {
+                    println!(
+                        "compare: {} -> {} ({} files -> {} files)",
+                        prev_rev.as_deref().unwrap_or("?"),
+                        curr_rev.as_deref().unwrap_or("?"),
+                        cmp.prev_files,
+                        cmp.curr_files
+                    );
+                    if !cmp.added.is_empty() {
+                        println!("\nadded ({}):", cmp.added.len());
+                        for f in cmp.added.iter().take(10) {
+                            println!("  + {}", f);
+                        }
+                    }
+                    if !cmp.removed.is_empty() {
+                        println!("\nremoved ({}):", cmp.removed.len());
+                        for f in cmp.removed.iter().take(10) {
+                            println!("  - {}", f);
+                        }
+                    }
+                    if !cmp.changed.is_empty() {
+                        println!(
+                            "\ncentrality changes (top {}):",
+                            args.top.min(cmp.changed.len())
+                        );
+                        for (file, prev_pr, curr_pr) in cmp.changed.iter().take(args.top) {
+                            let delta = curr_pr - prev_pr;
+                            let sign = if delta > 0.0 { "+" } else { "" };
+                            println!(
+                                "  {}{:.6}  {:.6} -> {:.6}  {}",
+                                sign, delta, prev_pr, curr_pr, file
+                            );
+                        }
+                    }
+                    if cmp.added.is_empty() && cmp.removed.is_empty() && cmp.changed.is_empty() {
+                        println!("no structural changes detected");
+                    }
+                }
+            }
+        }
         "drift" => {
             // Show centrality drift for a project (needs 2+ snapshots).
             // Usage: pkgrank query drift -- defaults to CWD.
