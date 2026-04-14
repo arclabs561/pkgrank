@@ -48,6 +48,17 @@ pub(crate) struct FilesArgs {
     /// Output format.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub format: OutputFormat,
+
+    /// Overlay git change history (change frequency + co-change coupling).
+    ///
+    /// When enabled, combines structural centrality with temporal signals
+    /// to produce a hotspot score. Requires a git repository.
+    #[arg(long, default_value_t = false)]
+    pub git: bool,
+
+    /// Git history window in days (default: 90).
+    #[arg(long, default_value_t = 90)]
+    pub git_days: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -1222,9 +1233,7 @@ pub(crate) struct FileRow {
     pub role: FileRole,
     pub in_degree: usize,
     pub out_degree: usize,
-    /// How many files transitively depend on this one (blast radius).
     pub dependents: usize,
-    /// How many files this one transitively depends on.
     pub dependencies: usize,
     pub pagerank: f64,
     pub consumers_pagerank: f64,
@@ -1232,6 +1241,12 @@ pub(crate) struct FileRow {
     pub orphan: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cycle_id: Option<usize>,
+    /// Number of commits touching this file in the git window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commits: Option<usize>,
+    /// Combined score: structural_centrality * change_frequency. Higher = riskier hotspot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub churn_risk: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1247,6 +1262,34 @@ pub(crate) struct FilesResult {
 // ---------------------------------------------------------------------------
 // Core analysis
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Git history analysis
+// ---------------------------------------------------------------------------
+
+/// Parse git log to get per-file commit counts within a time window.
+fn git_file_commit_counts(root: &Path, days: u64) -> HashMap<String, usize> {
+    let since = format!("--since={} days ago", days);
+    let out = ProcessCommand::new("git")
+        .args(["log", "--name-only", "--pretty=format:", &since])
+        .current_dir(root)
+        .output();
+    let out = match out {
+        Ok(o) if o.status.success() => o,
+        _ => return HashMap::new(),
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        *counts.entry(line.to_string()).or_insert(0) += 1;
+    }
+    counts
+}
 
 /// Clone a git URL to a temp directory. Returns the path.
 fn clone_repo_to_temp(url: &str) -> Result<PathBuf> {
@@ -1398,6 +1441,14 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
         }
     }
 
+    // Git history (optional).
+    let git_counts: HashMap<String, usize> = if args.git {
+        git_file_commit_counts(&root, args.git_days)
+    } else {
+        HashMap::new()
+    };
+    let max_commits = git_counts.values().copied().max().unwrap_or(1).max(1) as f64;
+
     let mut rows: Vec<FileRow> = graph
         .node_indices()
         .map(|n| {
@@ -1413,6 +1464,14 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
             let scc_label = scc_labels[n.index()];
             let cycle_id = cycle_id_map.get(&scc_label).copied();
 
+            let commits = if args.git {
+                Some(git_counts.get(&rel).copied().unwrap_or(0))
+            } else {
+                None
+            };
+            // Churn risk: PageRank * normalized change frequency.
+            let churn_risk = commits.map(|c| pr[n.index()] * (c as f64 / max_commits));
+
             FileRow {
                 file: rel,
                 role,
@@ -1425,17 +1484,28 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
                 betweenness: bc[n.index()],
                 orphan: in_degree == 0 && out_degree == 0,
                 cycle_id,
+                commits,
+                churn_risk,
             }
         })
         .collect();
 
-    rows.sort_by(|a, b| match args.metric {
-        Metric::Pagerank => b.pagerank.total_cmp(&a.pagerank),
-        Metric::ConsumersPagerank => b.consumers_pagerank.total_cmp(&a.consumers_pagerank),
-        Metric::Betweenness => b.betweenness.total_cmp(&a.betweenness),
-        Metric::Indegree => b.in_degree.cmp(&a.in_degree),
-        Metric::Outdegree => b.out_degree.cmp(&a.out_degree),
-    });
+    // Sort by churn_risk when git is enabled and metric is PageRank, otherwise by metric.
+    if args.git && matches!(args.metric, Metric::Pagerank) {
+        rows.sort_by(|a, b| {
+            b.churn_risk
+                .unwrap_or(0.0)
+                .total_cmp(&a.churn_risk.unwrap_or(0.0))
+        });
+    } else {
+        rows.sort_by(|a, b| match args.metric {
+            Metric::Pagerank => b.pagerank.total_cmp(&a.pagerank),
+            Metric::ConsumersPagerank => b.consumers_pagerank.total_cmp(&a.consumers_pagerank),
+            Metric::Betweenness => b.betweenness.total_cmp(&a.betweenness),
+            Metric::Indegree => b.in_degree.cmp(&a.in_degree),
+            Metric::Outdegree => b.out_degree.cmp(&a.out_degree),
+        });
+    }
 
     let orphan_count = rows.iter().filter(|r| r.orphan).count();
 
@@ -1493,33 +1563,60 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
         OutputFormat::Text => {
+            let git_label = if args.git {
+                format!("  git_days={}", args.git_days)
+            } else {
+                String::new()
+            };
             println!(
-                "pkgrank files  ecosystem={}  metric={:?}  include_tests={}\n",
-                result.ecosystem, args.metric, args.include_tests
+                "pkgrank files  ecosystem={}  metric={:?}  include_tests={}{}\n",
+                result.ecosystem, args.metric, args.include_tests, git_label
             );
-            println!(
-                "{:>4}  {:>10}  {:>10}  {:>9}  {:>5}  {:>5}  {:>3}  {:>3}  {:<10}  file",
-                "rank", "pr", "cons_pr", "between", "blast", "deps", "in", "out", "role"
-            );
+            if args.git {
+                println!(
+                    "{:>4}  {:>8}  {:>5}  {:>10}  {:>5}  {:>3}  {:>3}  {:<10}  file",
+                    "rank", "churn", "comms", "pr", "blast", "in", "out", "role"
+                );
+            } else {
+                println!(
+                    "{:>4}  {:>10}  {:>10}  {:>9}  {:>5}  {:>5}  {:>3}  {:>3}  {:<10}  file",
+                    "rank", "pr", "cons_pr", "between", "blast", "deps", "in", "out", "role"
+                );
+            }
             println!("{:\u{2500}<110}", "");
             for (i, r) in result.rows.iter().take(args.top).enumerate() {
                 let mut label = format!("{:?}", r.role).to_lowercase();
                 if r.cycle_id.is_some() {
                     label = format!("{}*", label);
                 }
-                println!(
-                    "{:>4}. {:>10.6} {:>10.6} {:>9.6} {:>5} {:>5} {:>3} {:>3}  {:<10}  {}",
-                    i + 1,
-                    r.pagerank,
-                    r.consumers_pagerank,
-                    r.betweenness,
-                    r.dependents,
-                    r.dependencies,
-                    r.in_degree,
-                    r.out_degree,
-                    label,
-                    r.file
-                );
+                if args.git {
+                    println!(
+                        "{:>4}. {:>8.6} {:>5} {:>10.6} {:>5} {:>3} {:>3}  {:<10}  {}",
+                        i + 1,
+                        r.churn_risk.unwrap_or(0.0),
+                        r.commits.unwrap_or(0),
+                        r.pagerank,
+                        r.dependents,
+                        r.in_degree,
+                        r.out_degree,
+                        label,
+                        r.file
+                    );
+                } else {
+                    println!(
+                        "{:>4}. {:>10.6} {:>10.6} {:>9.6} {:>5} {:>5} {:>3} {:>3}  {:<10}  {}",
+                        i + 1,
+                        r.pagerank,
+                        r.consumers_pagerank,
+                        r.betweenness,
+                        r.dependents,
+                        r.dependencies,
+                        r.in_degree,
+                        r.out_degree,
+                        label,
+                        r.file
+                    );
+                }
             }
 
             // Summary.

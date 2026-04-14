@@ -1496,6 +1496,8 @@ impl PkgrankStdioMcpFull {
             metric,
             top,
             format: OutputFormat::Json,
+            git: false,
+            git_days: 90,
         };
         let result =
             files_analyze(&args).map_err(|e| McpError::internal_error(format!("{:#}", e), None))?;
