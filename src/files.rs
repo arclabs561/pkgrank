@@ -1842,16 +1842,16 @@ fn files_cache_key(files: &[PathBuf], args: &FilesArgs) -> u64 {
 }
 
 fn files_cache_read(cache_dir: &Path, key: u64) -> Option<FilesResult> {
-    let path = cache_dir.join(format!("files_{:016x}.json", key));
-    let raw = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&raw).ok()
+    let path = cache_dir.join(format!("files_{:016x}.bin", key));
+    let raw = std::fs::read(&path).ok()?;
+    bincode::deserialize(&raw).ok()
 }
 
 fn files_cache_write(cache_dir: &Path, key: u64, result: &FilesResult) {
     let _ = std::fs::create_dir_all(cache_dir);
-    let path = cache_dir.join(format!("files_{:016x}.json", key));
-    if let Ok(json) = serde_json::to_string(result) {
-        let _ = std::fs::write(&path, json);
+    let path = cache_dir.join(format!("files_{:016x}.bin", key));
+    if let Ok(bytes) = bincode::serialize(result) {
+        let _ = std::fs::write(&path, bytes);
     }
 }
 
