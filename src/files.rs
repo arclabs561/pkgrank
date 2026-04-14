@@ -1664,6 +1664,9 @@ pub(crate) struct FileRow {
     /// Files that most frequently change in the same commit (temporal coupling).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub co_changers: Vec<(String, usize)>,
+    /// Structural role: "foundation" (high in, low out), "hub" (high both),
+    /// "consumer" (low in, high out), "leaf" (low both).
+    pub structure: String,
     /// External packages this file imports (ecosystem-level deps).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub external_deps: Vec<String>,
@@ -2317,10 +2320,45 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
                 commits,
                 churn_risk,
                 co_changers,
+                structure: String::new(), // filled below
                 external_deps: ext_deps,
             }
         })
         .collect();
+
+    // Compute structural roles based on median degree.
+    let median_in = {
+        let mut ins: Vec<usize> = rows.iter().map(|r| r.in_degree).collect();
+        ins.sort();
+        if ins.is_empty() {
+            0
+        } else {
+            ins[ins.len() / 2]
+        }
+    };
+    let median_out = {
+        let mut outs: Vec<usize> = rows.iter().map(|r| r.out_degree).collect();
+        outs.sort();
+        if outs.is_empty() {
+            0
+        } else {
+            outs[outs.len() / 2]
+        }
+    };
+    for row in &mut rows {
+        row.structure = match (row.in_degree > median_in, row.out_degree > median_out) {
+            (true, false) => "foundation".to_string(), // many depend on me, I depend on few
+            (true, true) => "hub".to_string(),         // many depend on me AND I depend on many
+            (false, true) => "consumer".to_string(),   // few depend on me, I depend on many
+            (false, false) => {
+                if row.orphan {
+                    "orphan".to_string()
+                } else {
+                    "leaf".to_string()
+                }
+            }
+        };
+    }
 
     if args.git && matches!(args.metric, Metric::Pagerank) {
         rows.sort_by(|a, b| {
@@ -2425,9 +2463,9 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
             }
             println!("{:\u{2500}<110}", "");
             for (i, r) in result.rows.iter().take(args.top).enumerate() {
-                let mut label = format!("{:?}", r.role).to_lowercase();
+                let mut label = r.structure.clone();
                 if r.cycle_id.is_some() {
-                    label = format!("{}*", label);
+                    label.push('*');
                 }
                 if args.git {
                     println!(
