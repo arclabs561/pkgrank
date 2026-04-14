@@ -350,6 +350,120 @@ struct FileEdge {
     to: PathBuf,
 }
 
+/// Extract external dependency names from source files.
+fn extract_external_deps(
+    files: &[PathBuf],
+    ecosystem: Ecosystem,
+    internal_prefixes: &HashSet<String>,
+) -> HashMap<PathBuf, Vec<String>> {
+    let mut result: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    let std_prefixes: HashSet<&str> = match ecosystem {
+        Ecosystem::Cargo => ["std", "core", "alloc", "proc_macro", "test"]
+            .iter()
+            .copied()
+            .collect(),
+        Ecosystem::Python => {
+            // Skip stdlib -- too many to list, focus on third-party.
+            HashSet::new()
+        }
+        Ecosystem::Npm | Ecosystem::Go => HashSet::new(),
+    };
+
+    for file in files {
+        let content = match std::fs::read_to_string(file) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let mut deps: HashSet<String> = HashSet::new();
+
+        for line in content.lines() {
+            let line = line.trim();
+            match ecosystem {
+                Ecosystem::Cargo => {
+                    // `use foo::...` where foo is not crate/super/self/known
+                    let use_part = strip_visibility(line)
+                        .strip_prefix("use ")
+                        .or_else(|| line.strip_prefix("use "));
+                    if let Some(use_part) = use_part {
+                        let use_part = use_part.trim_end_matches(';').trim();
+                        if use_part.starts_with("crate::")
+                            || use_part.starts_with("super::")
+                            || use_part.starts_with("self::")
+                        {
+                            continue;
+                        }
+                        let first_seg = use_part.split("::").next().unwrap_or("");
+                        if !first_seg.is_empty()
+                            && !internal_prefixes.contains(first_seg)
+                            && !std_prefixes.contains(first_seg)
+                        {
+                            deps.insert(first_seg.to_string());
+                        }
+                    }
+                }
+                Ecosystem::Python => {
+                    if let Some(rest) = line.strip_prefix("import ") {
+                        let mod_name = rest.split(' ').next().unwrap_or(rest);
+                        let top = mod_name.split('.').next().unwrap_or(mod_name);
+                        if !top.is_empty()
+                            && !top.starts_with('.')
+                            && !internal_prefixes.contains(top)
+                        {
+                            deps.insert(top.to_string());
+                        }
+                    } else if let Some(rest) = line.strip_prefix("from ") {
+                        if let Some((mod_part, _)) = rest.split_once(" import ") {
+                            let mod_part = mod_part.trim();
+                            if !mod_part.starts_with('.') {
+                                let top = mod_part.split('.').next().unwrap_or(mod_part);
+                                if !internal_prefixes.contains(top) {
+                                    deps.insert(top.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                Ecosystem::Npm => {
+                    for spec in extract_js_import_specifiers(line) {
+                        if !spec.starts_with('.') && !spec.starts_with('@') {
+                            let pkg = spec.split('/').next().unwrap_or(&spec);
+                            deps.insert(pkg.to_string());
+                        } else if spec.starts_with("@") {
+                            // Scoped package: @scope/pkg
+                            let parts: Vec<&str> = spec.splitn(3, '/').collect();
+                            if parts.len() >= 2 {
+                                deps.insert(format!("{}/{}", parts[0], parts[1]));
+                            }
+                        }
+                    }
+                }
+                Ecosystem::Go => {
+                    if let Some(import_path) = extract_go_import(line) {
+                        if !internal_prefixes
+                            .iter()
+                            .any(|p| import_path.starts_with(p.as_str()))
+                        {
+                            // Use the first two segments as the package identifier.
+                            let parts: Vec<&str> = import_path.splitn(4, '/').collect();
+                            if parts.len() >= 3 {
+                                deps.insert(format!("{}/{}/{}", parts[0], parts[1], parts[2]));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !deps.is_empty() {
+            let mut sorted: Vec<String> = deps.into_iter().collect();
+            sorted.sort();
+            result.insert(file.clone(), sorted);
+        }
+    }
+
+    result
+}
+
 // ---------------------------------------------------------------------------
 // Rust import parser
 // ---------------------------------------------------------------------------
@@ -1356,12 +1470,13 @@ pub(crate) struct FileRow {
     pub orphan: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cycle_id: Option<usize>,
-    /// Number of commits touching this file in the git window.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commits: Option<usize>,
-    /// Combined score: structural_centrality * change_frequency. Higher = riskier hotspot.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub churn_risk: Option<f64>,
+    /// External packages this file imports (ecosystem-level deps).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub external_deps: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1542,6 +1657,39 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
         Ecosystem::Go => parse_go_imports(&root, &included_files),
     };
 
+    // Extract external dependency names per file.
+    let mut internal_prefixes: HashSet<String> = HashSet::new();
+    match ecosystem {
+        Ecosystem::Cargo => {
+            let crate_roots = find_rust_crate_roots(&root);
+            for (_, name) in &crate_roots {
+                internal_prefixes.insert(name.clone());
+            }
+            // Also add all known module names (from mod declarations) as internal.
+            for file in &included_files {
+                if let Ok(content) = std::fs::read_to_string(file) {
+                    for line in content.lines() {
+                        if let Some(mod_name) = parse_mod_declaration(line.trim()) {
+                            internal_prefixes.insert(mod_name);
+                        }
+                    }
+                }
+            }
+        }
+        Ecosystem::Python => {
+            let (pkg_name, _) = detect_python_package(&root);
+            internal_prefixes.insert(pkg_name);
+        }
+        Ecosystem::Go => {
+            let mod_name = read_go_module_name(&root);
+            if !mod_name.is_empty() {
+                internal_prefixes.insert(mod_name);
+            }
+        }
+        Ecosystem::Npm => {} // JS doesn't have a simple internal prefix
+    }
+    let external_deps_map = extract_external_deps(&included_files, ecosystem, &internal_prefixes);
+
     let mut graph: DiGraph<PathBuf, f64> = DiGraph::new();
     let mut node_map: HashMap<PathBuf, NodeIndex> = HashMap::new();
 
@@ -1712,6 +1860,12 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
                 None
             };
             let churn_risk = commits.map(|c| av.pr[i] * (c as f64 / max_commits));
+            let ext_deps = if args.directory {
+                Vec::new()
+            } else {
+                let full = root.join(&rel);
+                external_deps_map.get(&full).cloned().unwrap_or_default()
+            };
 
             FileRow {
                 file: rel,
@@ -1727,6 +1881,7 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
                 cycle_id,
                 commits,
                 churn_risk,
+                external_deps: ext_deps,
             }
         })
         .collect();
