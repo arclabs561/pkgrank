@@ -1,7 +1,7 @@
 # Managed by repository-settings/app
 # https://github.com/repository-settings/app
 repository:
-  description: "Dependency graph centrality analysis"
+  description: "Centrality analysis for dependency graphs and file-level import graphs"
   homepage: "https://github.com/arclabs561/pkgrank"
   private: false
   has_issues: true
@@ -13,8 +13,10 @@ repository:
   allow_rebase_merge: true
   delete_branch_on_merge: true
   topics:
-    - cargo
     - dependency-graph
     - graph-analysis
+    - pagerank
+    - code-analysis
     - mcp
     - rust
+    - polyglot
