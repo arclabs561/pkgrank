@@ -903,19 +903,38 @@ fn resolve_use_path(path: &str, mod_to_file: &HashMap<String, PathBuf>, out: &mu
 // ---------------------------------------------------------------------------
 
 fn parse_python_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
-    // Detect the package directory (src/pkg/ or pkg/ or root).
-    let (pkg_name, pkg_dir) = detect_python_package(root);
+    let packages = detect_python_packages(root);
 
     // Map: module path (dot-separated) → file path.
     let mut mod_to_file: HashMap<String, PathBuf> = HashMap::new();
     let mut file_to_mod: HashMap<PathBuf, String> = HashMap::new();
 
-    for file in files {
-        if let Some(mod_path) = python_file_to_mod_path(file, &pkg_dir, &pkg_name) {
-            mod_to_file.insert(mod_path.clone(), file.clone());
-            file_to_mod.insert(file.clone(), mod_path);
+    for (pkg_name, pkg_dir) in &packages {
+        for file in files {
+            if !file.starts_with(pkg_dir) {
+                continue;
+            }
+            if let Some(mod_path) = python_file_to_mod_path(file, pkg_dir, pkg_name) {
+                mod_to_file.insert(mod_path.clone(), file.clone());
+                file_to_mod.insert(file.clone(), mod_path);
+            }
         }
     }
+    // Fallback: map any unmapped files against the first package.
+    if let Some((pkg_name, pkg_dir)) = packages.first() {
+        for file in files {
+            if !file_to_mod.contains_key(file) {
+                if let Some(mod_path) = python_file_to_mod_path(file, pkg_dir, pkg_name) {
+                    mod_to_file.insert(mod_path.clone(), file.clone());
+                    file_to_mod.insert(file.clone(), mod_path);
+                }
+            }
+        }
+    }
+    let pkg_name = packages
+        .first()
+        .map(|(n, _)| n.clone())
+        .unwrap_or_else(|| "pkg".to_string());
 
     let mut edges = Vec::new();
 
@@ -963,7 +982,9 @@ fn parse_python_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
     edges
 }
 
-fn detect_python_package(root: &Path) -> (String, PathBuf) {
+fn detect_python_packages(root: &Path) -> Vec<(String, PathBuf)> {
+    let mut packages = Vec::new();
+
     // Check src/ layout first.
     let src = root.join("src");
     if src.is_dir() {
@@ -976,7 +997,7 @@ fn detect_python_package(root: &Path) -> (String, PathBuf) {
                         .and_then(|n| n.to_str())
                         .unwrap_or("pkg")
                         .to_string();
-                    return (name, p);
+                    packages.push((name, p));
                 }
             }
         }
@@ -995,20 +1016,40 @@ fn detect_python_package(root: &Path) -> (String, PathBuf) {
                 if !matches!(
                     name.as_str(),
                     "tests" | "test" | "docs" | "examples" | "benchmarks"
-                ) {
-                    return (name, p);
+                ) && !packages.iter().any(|(n, _)| n == &name)
+                {
+                    packages.push((name, p));
                 }
             }
         }
     }
 
     // Fallback: treat root as the package.
-    let name = root
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("pkg")
-        .to_string();
-    (name, root.to_path_buf())
+    if packages.is_empty() {
+        let name = root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("pkg")
+            .to_string();
+        packages.push((name, root.to_path_buf()));
+    }
+
+    packages
+}
+
+/// Backward-compatible wrapper for single-package detection.
+fn detect_python_package(root: &Path) -> (String, PathBuf) {
+    detect_python_packages(root)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| {
+            let name = root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("pkg")
+                .to_string();
+            (name, root.to_path_buf())
+        })
 }
 
 fn python_file_to_mod_path(file: &Path, pkg_dir: &Path, pkg_name: &str) -> Option<String> {
