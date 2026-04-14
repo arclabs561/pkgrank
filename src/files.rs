@@ -693,12 +693,22 @@ fn parse_use_statement(
         let relative = use_part.strip_prefix("self::").unwrap_or(use_part);
         (format!("{}::{}", current_mod, relative), "")
     } else {
-        // Cross-crate: check if first segment is a known workspace crate.
         let first_seg = use_part.split("::").next().unwrap_or("");
         if known_crates.contains(first_seg) {
+            // Cross-crate workspace import: `use other_crate::foo`.
             (use_part.to_string(), "")
         } else {
-            return None;
+            // Try as bare sibling module: `use graph::Foo` → `current_mod::graph::Foo`.
+            let sibling_mod = format!("{}::{}", current_mod, first_seg);
+            let sibling_exists = mod_to_file.contains_key(&sibling_mod)
+                || mod_to_file
+                    .keys()
+                    .any(|k| k.starts_with(&format!("{}::", sibling_mod)));
+            if sibling_exists {
+                (format!("{}::{}", current_mod, use_part), "")
+            } else {
+                return None;
+            }
         }
     };
 
