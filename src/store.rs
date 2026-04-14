@@ -202,6 +202,46 @@ pub(crate) fn query_top_churn(
     Ok(rows)
 }
 
+/// Query: centrality drift -- files whose PageRank changed most between last two snapshots.
+pub(crate) fn query_drift(
+    conn: &Connection,
+    project_path: &str,
+    limit: usize,
+) -> Result<Vec<(String, f64, f64, f64)>> {
+    let mut stmt = conn.prepare(
+        "WITH latest AS (
+            SELECT id FROM snapshots WHERE project_id = (
+                SELECT id FROM projects WHERE path = ?1
+            ) ORDER BY analyzed_at DESC LIMIT 1
+        ), prev AS (
+            SELECT id FROM snapshots WHERE project_id = (
+                SELECT id FROM projects WHERE path = ?1
+            ) ORDER BY analyzed_at DESC LIMIT 1 OFFSET 1
+        )
+        SELECT f2.path, f1.pagerank as prev_pr, f2.pagerank as curr_pr,
+               (f2.pagerank - f1.pagerank) as delta
+        FROM files f2
+        JOIN latest ON f2.snapshot_id = latest.id
+        LEFT JOIN files f1 ON f1.path = f2.path
+            AND f1.snapshot_id = (SELECT id FROM prev)
+        WHERE f1.pagerank IS NOT NULL
+        ORDER BY ABS(f2.pagerank - f1.pagerank) DESC
+        LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(params![project_path, limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
 /// Query: most-used external dependencies across all projects.
 pub(crate) fn query_top_deps(conn: &Connection, limit: usize) -> Result<Vec<(String, i64)>> {
     let mut stmt = conn.prepare(

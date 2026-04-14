@@ -1098,6 +1098,28 @@ fn run_query(args: &QueryArgs) -> Result<()> {
                 println!("{:>5}  {}", count, dep);
             }
         }
+        "drift" => {
+            // Show centrality drift for a project (needs 2+ snapshots).
+            // Usage: pkgrank query drift -- defaults to CWD.
+            let project = ".";
+            let rows = store::query_drift(&conn, project, args.top)?;
+            if rows.is_empty() {
+                println!("no drift data (need 2+ snapshots for the same project)");
+                return Ok(());
+            }
+            println!(
+                "{:>9}  {:>10}  {:>10}  {}",
+                "delta", "prev_pr", "curr_pr", "file"
+            );
+            println!("{:\u{2500}<60}", "");
+            for (file, prev, curr, delta) in &rows {
+                let sign = if *delta > 0.0 { "+" } else { "" };
+                println!(
+                    "{}{:>8.6}  {:>10.6}  {:>10.6}  {}",
+                    sign, delta, prev, curr, file
+                );
+            }
+        }
         "projects" => {
             let mut stmt = conn.prepare(
                 "SELECT p.path, p.ecosystem, s.node_count, s.edge_count, s.cycle_count,
