@@ -1134,27 +1134,23 @@ fn parse_js_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
             let line = line.trim();
 
             for spec in extract_js_import_specifiers(line) {
-                let (resolve_dir, resolve_spec_owned);
-                if spec.starts_with('.') {
-                    resolve_dir = dir;
-                    resolve_spec_owned = spec;
+                // Resolve the import to a filesystem path.
+                let resolved = if spec.starts_with('.') {
+                    resolve_js_import(dir, &spec, &file_set)
                 } else if let Some(abs_path) = resolve_alias_to_path(&spec, &path_aliases) {
-                    // Alias resolved to absolute path -- resolve relative to root.
-                    resolve_dir = root;
-                    resolve_spec_owned = format!(
-                        "./{}",
-                        abs_path
-                            .strip_prefix(root)
-                            .unwrap_or(&abs_path)
-                            .to_string_lossy()
-                    );
+                    // Alias resolved to absolute path. Try with extensions.
+                    let parent = abs_path.parent().unwrap_or(root).to_path_buf();
+                    let fname = abs_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    resolve_js_import(&parent, &format!("./{}", fname), &file_set)
                 } else {
                     continue;
                 };
 
-                if let Some(resolved) =
-                    resolve_js_import(resolve_dir, &resolve_spec_owned, &file_set)
-                {
+                if let Some(resolved) = resolved {
                     if resolved != *file {
                         edges.push(FileEdge {
                             from: file.clone(),
@@ -1172,11 +1168,13 @@ fn parse_js_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
 /// Read path aliases from tsconfig.json / jsconfig.json.
 /// Returns Vec<(prefix, replacement_dir)>, e.g. ("@/", "./src/").
 fn read_tsconfig_paths(root: &Path) -> Vec<(String, PathBuf)> {
+    let mut aliases = Vec::new();
+
+    // Read tsconfig.json/jsconfig.json for path aliases.
     let candidates = ["tsconfig.json", "jsconfig.json"];
     for name in &candidates {
         let path = root.join(name);
         if let Ok(raw) = std::fs::read_to_string(&path) {
-            // Strip single-line comments (tsconfig allows them).
             let cleaned: String = raw
                 .lines()
                 .map(|l| {
@@ -1189,11 +1187,21 @@ fn read_tsconfig_paths(root: &Path) -> Vec<(String, PathBuf)> {
                 .collect::<Vec<_>>()
                 .join("\n");
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&cleaned) {
-                return extract_path_aliases(&val, root);
+                aliases = extract_path_aliases(&val, root);
+                break;
             }
         }
     }
-    Vec::new()
+
+    // Always discover workspace packages (even without tsconfig).
+    discover_workspace_packages(root, &mut aliases);
+
+    // Fallback: @/ → root if nothing else matched.
+    if aliases.is_empty() {
+        aliases.push(("@/".to_string(), root.to_path_buf()));
+    }
+
+    aliases
 }
 
 fn extract_path_aliases(tsconfig: &serde_json::Value, root: &Path) -> Vec<(String, PathBuf)> {
@@ -1224,12 +1232,107 @@ fn extract_path_aliases(tsconfig: &serde_json::Value, root: &Path) -> Vec<(Strin
         }
     }
 
-    // Common fallback: treat @/ as project root even without tsconfig.
-    if aliases.is_empty() {
-        aliases.push(("@/".to_string(), root.to_path_buf()));
-    }
+    // Discover npm/yarn/pnpm workspace packages.
+    // Maps `@scope/pkg` or `pkg` → the package's directory.
+    discover_workspace_packages(root, &mut aliases);
 
     aliases
+}
+
+/// Find all workspace packages by scanning for package.json files in common locations.
+fn discover_workspace_packages(root: &Path, aliases: &mut Vec<(String, PathBuf)>) {
+    // Read root package.json for workspace patterns.
+    let root_pkg = root.join("package.json");
+    if !root_pkg.exists() {
+        return;
+    }
+    let raw = match std::fs::read_to_string(&root_pkg) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    let val: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    // Workspace dirs: from "workspaces" field (npm/yarn) or common patterns.
+    let mut search_dirs: Vec<PathBuf> = Vec::new();
+    if let Some(workspaces) = val.get("workspaces") {
+        let patterns = if let Some(arr) = workspaces.as_array() {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        } else if let Some(obj) = workspaces.as_object() {
+            // yarn workspaces: { "packages": ["packages/*"] }
+            obj.get("packages")
+                .and_then(|p| p.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        for pattern in patterns {
+            let pattern = pattern.trim_end_matches("/*").trim_end_matches("/**");
+            let dir = root.join(pattern);
+            if dir.is_dir() {
+                search_dirs.push(dir);
+            }
+        }
+    }
+
+    // Common fallback patterns.
+    if search_dirs.is_empty() {
+        for dir_name in ["packages", "apps", "libs", "modules"] {
+            let d = root.join(dir_name);
+            if d.is_dir() {
+                search_dirs.push(d);
+            }
+        }
+    }
+
+    // Scan each workspace dir for package.json files.
+    for dir in &search_dirs {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let pkg_json = entry.path().join("package.json");
+            if !pkg_json.exists() {
+                continue;
+            }
+            let raw = match std::fs::read_to_string(&pkg_json) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let pkg_val: serde_json::Value = match serde_json::from_str(&raw) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if let Some(name) = pkg_val.get("name").and_then(|n| n.as_str()) {
+                // Map "name/" → package directory.
+                // For imports like `@calcom/lib/hooks/useLocale`,
+                // the prefix `@calcom/lib/` maps to `packages/lib/`.
+                let pkg_dir = entry.path();
+
+                // Check for explicit "main" or "exports" to find src root.
+                let src_dir = if pkg_dir.join("src").is_dir() {
+                    pkg_dir.join("src")
+                } else {
+                    pkg_dir.clone()
+                };
+
+                aliases.push((format!("{}/", name), src_dir));
+            }
+        }
+    }
 }
 
 fn resolve_alias_to_path(spec: &str, aliases: &[(String, PathBuf)]) -> Option<PathBuf> {
