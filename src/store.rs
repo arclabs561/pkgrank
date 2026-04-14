@@ -213,11 +213,11 @@ pub(crate) fn query_drift(
         "WITH latest AS (
             SELECT id FROM snapshots WHERE project_id = (
                 SELECT id FROM projects WHERE path = ?1
-            ) ORDER BY analyzed_at DESC LIMIT 1
+            ) ORDER BY analyzed_at DESC, id DESC LIMIT 1
         ), prev AS (
             SELECT id FROM snapshots WHERE project_id = (
                 SELECT id FROM projects WHERE path = ?1
-            ) ORDER BY analyzed_at DESC LIMIT 1 OFFSET 1
+            ) ORDER BY analyzed_at DESC, id DESC LIMIT 1 OFFSET 1
         )
         SELECT f2.path, f1.pagerank as prev_pr, f2.pagerank as curr_pr,
                (f2.pagerank - f1.pagerank) as delta
@@ -252,7 +252,7 @@ pub(crate) fn query_compare(
     let mut stmt = conn.prepare(
         "SELECT id, git_rev FROM snapshots WHERE project_id = (
             SELECT id FROM projects WHERE path = ?1
-        ) ORDER BY analyzed_at DESC LIMIT 2",
+        ) ORDER BY analyzed_at DESC, id DESC LIMIT 2",
     )?;
     let snaps: Vec<(i64, Option<String>)> = stmt
         .query_map(params![project_path], |row| Ok((row.get(0)?, row.get(1)?)))?
