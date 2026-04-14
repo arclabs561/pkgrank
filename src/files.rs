@@ -2613,6 +2613,45 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                     }
                 }
 
+                // Layer violations: stable files importing from unstable files.
+                // The dependency rule (Clean Architecture): deps should point toward stability.
+                let file_instability: HashMap<&str, f64> = result
+                    .rows
+                    .iter()
+                    .map(|r| (r.file.as_str(), r.instability))
+                    .collect();
+                let mut violations: Vec<(&str, &str, f64, f64)> = Vec::new();
+                for (from, to) in &result.direct_edges {
+                    let from_i = file_instability.get(from.as_str()).copied().unwrap_or(0.5);
+                    let to_i = file_instability.get(to.as_str()).copied().unwrap_or(0.5);
+                    // Violation: stable file (low I) imports from unstable file (high I).
+                    // Skip mod.rs → sibling edges (module tree structure, not real violations).
+                    let from_base = Path::new(from)
+                        .file_name()
+                        .and_then(|f| f.to_str())
+                        .unwrap_or("");
+                    let same_dir = Path::new(from).parent() == Path::new(to).parent();
+                    let is_mod_reexport = (from_base == "mod.rs"
+                        || from_base == "lib.rs"
+                        || from_base == "__init__.py"
+                        || from_base == "index.ts"
+                        || from_base == "index.js")
+                        && same_dir;
+                    if from_i < 0.3 && to_i > 0.7 && !is_mod_reexport {
+                        violations.push((from.as_str(), to.as_str(), from_i, to_i));
+                    }
+                }
+                if !violations.is_empty() {
+                    violations.sort_by(|a, b| (b.3 - b.2).total_cmp(&(a.3 - a.2)));
+                    println!(
+                        "\nlayer violations ({}, stable -> unstable):",
+                        violations.len()
+                    );
+                    for (from, to, fi, ti) in violations.iter().take(5) {
+                        println!("  {} (I={:.2}) -> {} (I={:.2})", from, fi, to, ti);
+                    }
+                }
+
                 // Leaves (highest out-degree, lowest in-degree) -- entry points/consumers.
                 let mut consumers: Vec<&FileRow> = result
                     .rows
