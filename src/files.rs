@@ -49,6 +49,12 @@ pub(crate) struct FilesArgs {
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub format: OutputFormat,
 
+    /// Focus on a specific file: show its imports, dependents, and co-changers.
+    ///
+    /// Accepts a partial path (e.g. "graph.rs" matches "src/hnsw/graph.rs").
+    #[arg(long)]
+    pub focus: Option<String>,
+
     /// Overlay git change history (change frequency + co-change coupling).
     ///
     /// When enabled, combines structural centrality with temporal signals
@@ -1227,7 +1233,7 @@ fn extract_go_import(line: &str) -> Option<String> {
 // Output row
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct FileRow {
     pub file: String,
     pub role: FileRole,
@@ -1257,6 +1263,9 @@ pub(crate) struct FilesResult {
     pub ecosystem: Ecosystem,
     pub orphan_count: usize,
     pub cycles: Vec<Vec<String>>,
+    /// Direct edges: (from_file, to_file).
+    #[serde(skip)]
+    pub direct_edges: Vec<(String, String)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1509,6 +1518,26 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
 
     let orphan_count = rows.iter().filter(|r| r.orphan).count();
 
+    // Collect direct edges for focus mode.
+    let direct_edges: Vec<(String, String)> = graph
+        .edge_references()
+        .map(|e| {
+            let from = graph.nw(e.source());
+            let to = graph.nw(e.target());
+            let from_rel = from
+                .strip_prefix(&root)
+                .unwrap_or(from)
+                .to_string_lossy()
+                .to_string();
+            let to_rel = to
+                .strip_prefix(&root)
+                .unwrap_or(to)
+                .to_string_lossy()
+                .to_string();
+            (from_rel, to_rel)
+        })
+        .collect();
+
     Ok(FilesResult {
         nodes: graph.node_count(),
         edges: graph.edge_count(),
@@ -1516,6 +1545,7 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
         orphan_count,
         cycles,
         rows,
+        direct_edges,
     })
 }
 
@@ -1545,7 +1575,7 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                 rows: Vec<FileRow>,
             }
             let rows_total = result.rows.len();
-            let rows: Vec<_> = result.rows.into_iter().take(args.top).collect();
+            let rows: Vec<FileRow> = result.rows.iter().take(args.top).cloned().collect();
             let out = Out {
                 schema_version: 1,
                 ok: true,
@@ -1555,7 +1585,7 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                 edges: result.edges,
                 orphan_count: result.orphan_count,
                 cycle_count: result.cycles.len(),
-                cycles: result.cycles,
+                cycles: result.cycles.clone(),
                 rows_total,
                 rows_returned: rows.len(),
                 rows,
@@ -1656,5 +1686,82 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
         }
     }
 
+    // Focus mode: show detailed info about a specific file.
+    if let Some(focus) = &args.focus {
+        print_focus(focus, &result);
+    }
+
     Ok(())
+}
+
+fn print_focus(query: &str, result: &FilesResult) {
+    // Match the query against file paths (partial match).
+    let matches: Vec<&FileRow> = result
+        .rows
+        .iter()
+        .filter(|r| r.file.contains(query))
+        .collect();
+
+    if matches.is_empty() {
+        eprintln!("no file matching '{}' found", query);
+        return;
+    }
+
+    for row in &matches {
+        println!("\n{:=<80}", "");
+        println!("focus: {}", row.file);
+        println!(
+            "  role={:?}  pagerank={:.6}  betweenness={:.6}",
+            row.role, row.pagerank, row.betweenness
+        );
+        println!(
+            "  in_degree={}  out_degree={}  blast_radius={}  deps={}",
+            row.in_degree, row.out_degree, row.dependents, row.dependencies
+        );
+        if let Some(c) = row.commits {
+            println!(
+                "  commits={}  churn_risk={:.6}",
+                c,
+                row.churn_risk.unwrap_or(0.0)
+            );
+        }
+        if let Some(cid) = row.cycle_id {
+            println!(
+                "  cycle_id={} ({} files)",
+                cid,
+                result.cycles.get(cid).map(|c| c.len()).unwrap_or(0)
+            );
+        }
+
+        // Direct imports (this file depends on).
+        let imports: Vec<&str> = result
+            .direct_edges
+            .iter()
+            .filter(|(from, _)| from == &row.file)
+            .map(|(_, to)| to.as_str())
+            .collect();
+        if !imports.is_empty() {
+            println!("  imports ({}):", imports.len());
+            for imp in &imports {
+                println!("    -> {}", imp);
+            }
+        }
+
+        // Direct dependents (files that import this one).
+        let dependents: Vec<&str> = result
+            .direct_edges
+            .iter()
+            .filter(|(_, to)| to == &row.file)
+            .map(|(from, _)| from.as_str())
+            .collect();
+        if !dependents.is_empty() {
+            println!("  imported by ({}):", dependents.len());
+            for dep in dependents.iter().take(15) {
+                println!("    <- {}", dep);
+            }
+            if dependents.len() > 15 {
+                println!("    ... (+{} more)", dependents.len() - 15);
+            }
+        }
+    }
 }
