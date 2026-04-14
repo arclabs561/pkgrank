@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::files::FilesResult;
 
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 /// Open or create the pkgrank SQLite database.
 pub(crate) fn open_db(db_path: &Path) -> Result<Connection> {
@@ -83,7 +83,16 @@ fn migrate(conn: &Connection) -> Result<()> {
             CREATE INDEX IF NOT EXISTS idx_snapshots_project_at ON snapshots(project_id, analyzed_at DESC, id DESC);
             ",
         )?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        conn.pragma_update(None, "user_version", 1)?;
+    }
+
+    if version < 2 {
+        // Add instability and structure columns.
+        conn.execute_batch(
+            "ALTER TABLE files ADD COLUMN instability REAL DEFAULT 0.0;
+             ALTER TABLE files ADD COLUMN structure TEXT DEFAULT '';",
+        )?;
+        conn.pragma_update(None, "user_version", 2)?;
     }
 
     Ok(())
@@ -146,8 +155,8 @@ pub(crate) fn store_snapshot(
 
     let mut file_stmt = tx.prepare(
         "INSERT INTO files (snapshot_id, path, role, pagerank, consumers_pagerank, betweenness,
-         in_degree, out_degree, dependents, dependencies, commits, churn_risk)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+         in_degree, out_degree, dependents, dependencies, commits, churn_risk, instability, structure)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
     )?;
     let mut dep_stmt =
         tx.prepare("INSERT INTO external_deps (file_id, package_name) VALUES (?1, ?2)")?;
@@ -166,6 +175,8 @@ pub(crate) fn store_snapshot(
             row.dependencies,
             row.commits,
             row.churn_risk,
+            row.instability,
+            row.structure,
         ])?;
         let file_id = tx.last_insert_rowid();
 
