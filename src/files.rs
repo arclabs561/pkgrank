@@ -1952,14 +1952,9 @@ fn resolve_js_import(dir: &Path, spec: &str, file_set: &HashSet<PathBuf>) -> Opt
 // ---------------------------------------------------------------------------
 
 fn parse_go_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
-    // Go imports are package-level (directory-based).
     let module_name = read_go_module_name(root);
 
-    // Map: package import path → canonical representative file.
-    // We pick one file per package to avoid N-edge fan-out.
-    // Preference: file named after package dir > doc.go > alphabetically first.
     let mut pkg_to_files: HashMap<String, Vec<PathBuf>> = HashMap::new();
-
     for file in files {
         if let Some(pkg_path) = go_file_to_pkg_path(file, root, &module_name) {
             pkg_to_files.entry(pkg_path).or_default().push(file.clone());
@@ -1969,7 +1964,6 @@ fn parse_go_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
     let mut pkg_canonical: HashMap<String, PathBuf> = HashMap::new();
     for (pkg, pkg_files) in &mut pkg_to_files {
         pkg_files.sort();
-        // Pick canonical: package-name-matching file > first non-doc > first.
         let pkg_leaf = pkg.rsplit('/').next().unwrap_or(pkg);
         let canonical = pkg_files
             .iter()
@@ -1996,21 +1990,17 @@ fn parse_go_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
 
     let mut edges = Vec::new();
 
-    // Cross-package edges from import statements.
     for file in files {
         let content = match std::fs::read_to_string(file) {
             Ok(c) => c,
             Err(_) => continue,
         };
-
         for line in content.lines() {
             let line = line.trim();
-
             if let Some(import_path) = extract_go_import(line) {
                 if !import_path.starts_with(&module_name) {
                     continue;
                 }
-
                 if let Some(target) = pkg_canonical.get(&import_path) {
                     if target != file {
                         edges.push(FileEdge {
@@ -2023,14 +2013,11 @@ fn parse_go_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
         }
     }
 
-    // Intra-package edges: Go files in the same directory share a namespace.
-    // Connect non-canonical files to the canonical file (star topology per package).
-    // This represents that files in the same package form a compilation unit.
+    // Intra-package edges.
     for (pkg, canonical) in &pkg_canonical {
         if let Some(pkg_files) = pkg_to_files.get(pkg) {
             for f in pkg_files {
                 if f != canonical {
-                    // Non-canonical file "imports" the canonical (they share the namespace).
                     edges.push(FileEdge {
                         from: f.clone(),
                         to: canonical.clone(),
@@ -2249,12 +2236,24 @@ pub(crate) struct ArchRules {
     /// Denied dependencies between layers.
     #[serde(default)]
     pub deny: Vec<DenyRule>,
+    /// Allowed dependencies: layer may only import from listed layers.
+    /// Stricter than deny -- any unlisted import is a violation.
+    #[serde(default)]
+    pub allow: Vec<AllowRule>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct DenyRule {
     pub from: String,
     pub to: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct AllowRule {
+    /// The layer being constrained.
+    pub from: String,
+    /// Layers this layer is allowed to import from.
+    pub to: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2310,7 +2309,19 @@ pub(crate) fn check_arch_rules(
         }
     }
 
-    // Check each edge against deny rules.
+    // Build allow-set lookup: layer -> set of allowed target layers.
+    let allow_sets: HashMap<&str, HashSet<&str>> = rules
+        .allow
+        .iter()
+        .map(|r| {
+            (
+                r.from.as_str(),
+                r.to.iter().map(|s| s.as_str()).collect::<HashSet<_>>(),
+            )
+        })
+        .collect();
+
+    // Check each edge against deny and allow rules.
     let mut violations = Vec::new();
     for (from, to) in edges {
         let from_layer = match file_layer.get(from.as_str()) {
@@ -2321,11 +2332,27 @@ pub(crate) fn check_arch_rules(
             Some(l) => *l,
             None => continue,
         };
+        // Same-layer imports are always allowed.
+        if from_layer == to_layer {
+            continue;
+        }
+        // Check deny rules (explicit blocklist).
         for rule in &rules.deny {
             if rule.from == from_layer && rule.to == to_layer {
                 violations.push(RuleViolation {
                     rule_from: rule.from.clone(),
                     rule_to: rule.to.clone(),
+                    file_from: from.clone(),
+                    file_to: to.clone(),
+                });
+            }
+        }
+        // Check allow rules (explicit allowlist -- anything not listed is denied).
+        if let Some(allowed) = allow_sets.get(from_layer) {
+            if !allowed.contains(to_layer) {
+                violations.push(RuleViolation {
+                    rule_from: from_layer.to_string(),
+                    rule_to: format!("!{}", to_layer),
                     file_from: from.clone(),
                     file_to: to.clone(),
                 });

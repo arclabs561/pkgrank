@@ -190,18 +190,24 @@ domain = ["src/domain/**", "src/models/**"]
 infra = ["src/infra/**", "src/db/**"]
 api = ["src/api/**", "src/routes/**"]
 
+# Deny rules: explicitly forbid specific imports
 [[deny]]
 from = "domain"
 to = "infra"
 
-[[deny]]
+# Allow rules: layer may ONLY import from listed layers (stricter)
+[[allow]]
 from = "domain"
-to = "api"
+to = ["domain"]  # domain may only import domain -- no infra, no api
 ```
 
-Layers map glob patterns to names. Deny rules forbid imports from one layer to another. Violations are reported during `pkgrank files` and cause `--fail-on-violation` to exit 1.
+Two rule types:
+- **`[[deny]]`**: blocklist -- forbid specific layer-to-layer imports.
+- **`[[allow]]`**: allowlist -- a layer may only import from the listed layers. Any unlisted import is a violation. Stricter and catches violations proactively.
 
-This works for any ecosystem -- the same `.pkgrank.toml` applies to Rust, Python, JS/TS, or Go projects.
+Same-layer imports are always permitted. Violations are reported during `pkgrank files` and cause `--fail-on-violation` to exit 1.
+
+Works for any ecosystem -- the same `.pkgrank.toml` applies to Rust, Python, JS/TS, or Go projects.
 
 ## Cargo workspace tools
 
