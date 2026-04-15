@@ -30,7 +30,7 @@ pub(crate) struct UpgradePriorityArgs {
     pub top: usize,
 
     /// Output format.
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    #[arg(long, value_enum, default_value_t = OutputFormat::Auto)]
     pub format: OutputFormat,
 
     /// Cache graph analysis results.
@@ -184,7 +184,7 @@ pub(crate) fn run_upgrade_priority(args: &UpgradePriorityArgs) -> Result<()> {
             };
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
-        OutputFormat::Text => {
+        OutputFormat::Text | OutputFormat::Auto => {
             println!("upgrade-priority  ({} outdated)\n", outdated_count);
             println!(
                 "{:>4}  {:<20} {:>10} {:>10} {:>10} {:>7} {:>8} {:>5}  pr",

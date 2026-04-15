@@ -38,7 +38,7 @@ pub(crate) struct FilesArgs {
     pub top: usize,
 
     /// Output format.
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    #[arg(long, value_enum, default_value_t = OutputFormat::Auto)]
     pub format: OutputFormat,
 
     /// Aggregate results by directory instead of individual files.
@@ -3413,7 +3413,7 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
             };
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
-        OutputFormat::Text => {
+        OutputFormat::Text | OutputFormat::Auto => {
             let git_label = if args.git {
                 format!("  git_days={}", args.git_days)
             } else {
@@ -3660,7 +3660,7 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                     };
                     println!("{}", serde_json::to_string_pretty(&out)?);
                 }
-                OutputFormat::Text => {
+                OutputFormat::Text | OutputFormat::Auto => {
                     println!(
                         "\naffected by [{}] ({} files):",
                         changed.join(", "),
@@ -3694,7 +3694,7 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                 OutputFormat::Json => {
                     // Will be included in fail-on-violation error below.
                 }
-                OutputFormat::Text => {
+                OutputFormat::Text | OutputFormat::Auto => {
                     println!("\nrule violations ({}, from .pkgrank.toml):", v.len());
                     for rv in v.iter().take(10) {
                         println!(

@@ -39,7 +39,7 @@ pub(crate) struct ModulesArgs {
     pub(crate) top: usize,
 
     /// Output format.
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    #[arg(long, value_enum, default_value_t = OutputFormat::Auto)]
     pub(crate) format: OutputFormat,
 
     /// Which edge kinds from cargo-modules to include.
@@ -212,7 +212,7 @@ pub(crate) struct ModulesSweepArgs {
     pub(crate) top: usize,
 
     /// Output format.
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    #[arg(long, value_enum, default_value_t = OutputFormat::Auto)]
     pub(crate) format: OutputFormat,
 
     /// Which edge kinds from cargo-modules to include.
@@ -500,7 +500,7 @@ pub(crate) fn run_modules_sweep(args: &ModulesSweepArgs) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&out)?);
             Ok(())
         }
-        OutputFormat::Text => {
+        OutputFormat::Text | OutputFormat::Auto => {
             println!("pkgrank modules-sweep");
             println!("  manifest: {}", args.manifest_path.display());
             println!("  packages: {}  ({})", packages.len(), packages.join(", "));
@@ -678,7 +678,7 @@ pub(crate) fn run_modules(args: &ModulesArgs) -> Result<()> {
             };
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
-        OutputFormat::Text => {
+        OutputFormat::Text | OutputFormat::Auto => {
             print_modules_text(&eff, &rows, nodes, edges, &aggregate_label, &top_edges);
         }
     }

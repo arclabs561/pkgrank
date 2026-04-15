@@ -34,7 +34,7 @@ pub(crate) struct BlastRadiusArgs {
     pub workspace_only: bool,
 
     /// Output format.
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    #[arg(long, value_enum, default_value_t = OutputFormat::Auto)]
     pub format: OutputFormat,
 
     /// Top-N dependents to show (0 = all).
@@ -271,7 +271,7 @@ fn print_blast_radius(result: &BlastRadiusResult, args: &BlastRadiusArgs) -> Res
             };
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
-        OutputFormat::Text => {
+        OutputFormat::Text | OutputFormat::Auto => {
             if !result.found {
                 println!(
                     "blast-radius: package '{}' not found in the dependency graph.",

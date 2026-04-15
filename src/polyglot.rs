@@ -34,7 +34,7 @@ pub(crate) struct PolyglotArgs {
     pub top: usize,
 
     /// Output format.
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    #[arg(long, value_enum, default_value_t = OutputFormat::Auto)]
     pub format: OutputFormat,
 }
 
@@ -130,7 +130,7 @@ pub(crate) fn run_polyglot(args: &PolyglotArgs) -> Result<()> {
             };
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
-        OutputFormat::Text => {
+        OutputFormat::Text | OutputFormat::Auto => {
             println!(
                 "pkgrank polyglot  ecosystem={}  metric={:?}\n",
                 args.ecosystem, args.metric

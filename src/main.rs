@@ -232,7 +232,7 @@ pub(crate) struct AnalyzeArgs {
     features: Option<String>,
 
     /// Output format.
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    #[arg(long, value_enum, default_value_t = OutputFormat::Auto)]
     format: OutputFormat,
 
     /// Print timing + size stats to stderr.
@@ -261,10 +261,15 @@ pub(crate) struct AnalyzeArgs {
 /// Returns Json when the explicit format is Text but stdout is not a TTY (piped).
 pub(crate) fn effective_format(explicit: OutputFormat) -> OutputFormat {
     use std::io::IsTerminal;
-    if explicit == OutputFormat::Text && !std::io::stdout().is_terminal() {
-        OutputFormat::Json
-    } else {
-        explicit
+    match explicit {
+        OutputFormat::Auto => {
+            if std::io::stdout().is_terminal() {
+                OutputFormat::Text
+            } else {
+                OutputFormat::Json
+            }
+        }
+        other => other, // Explicit choice always wins.
     }
 }
 
@@ -280,6 +285,8 @@ pub(crate) enum Metric {
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 pub(crate) enum OutputFormat {
+    /// Auto-detect: text on TTY, JSON when piped.
+    Auto,
     Text,
     Json,
 }
@@ -495,7 +502,7 @@ struct TriageCliArgs {
     llm_include_raw: bool,
 
     /// Output format.
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    #[arg(long, value_enum, default_value_t = OutputFormat::Auto)]
     format: OutputFormat,
 }
 
@@ -843,7 +850,7 @@ fn run_triage(args: &TriageCliArgs) -> Result<()> {
                 });
                 println!("{}", serde_json::to_string_pretty(&out)?);
             }
-            OutputFormat::Text => {
+            OutputFormat::Text | OutputFormat::Auto => {
                 print!("{summary_text}");
             }
         }
@@ -959,7 +966,7 @@ fn run_analyze(args: &AnalyzeArgs) -> Result<()> {
             bytes_printed = Some(s.len() as u64);
             println!("{s}");
         }
-        OutputFormat::Text => print_text(
+        OutputFormat::Text | OutputFormat::Auto => print_text(
             &rows,
             args.metric,
             args.top,
@@ -3689,7 +3696,7 @@ fn run_cratesio(args: &CratesIoArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&out)?);
             }
         }
-        OutputFormat::Text => {
+        OutputFormat::Text | OutputFormat::Auto => {
             if !args.quiet {
                 println!(
                     "crates.io graph: {} nodes, {} edges",
