@@ -236,9 +236,9 @@ fn classify_go_file(path: &Path, project_root: &Path) -> FileRole {
 
 fn classify_file(path: &Path, project_root: &Path, ecosystem: Ecosystem) -> FileRole {
     match ecosystem {
-        Ecosystem::Cargo => classify_rust_file(path, project_root),
+        Ecosystem::Rust => classify_rust_file(path, project_root),
         Ecosystem::Python => classify_python_file(path, project_root),
-        Ecosystem::Npm => classify_js_file(path, project_root),
+        Ecosystem::Js => classify_js_file(path, project_root),
         Ecosystem::Go => classify_go_file(path, project_root),
     }
 }
@@ -264,7 +264,7 @@ pub(crate) fn detect_ecosystem(dir: &Path) -> Option<Ecosystem> {
 pub(crate) fn detect_all_ecosystems(dir: &Path) -> Vec<Ecosystem> {
     let mut ecosystems = Vec::new();
     if dir.join("Cargo.toml").exists() {
-        ecosystems.push(Ecosystem::Cargo);
+        ecosystems.push(Ecosystem::Rust);
     }
     if dir.join("go.mod").exists() {
         ecosystems.push(Ecosystem::Go);
@@ -281,7 +281,7 @@ pub(crate) fn detect_all_ecosystems(dir: &Path) -> Vec<Ecosystem> {
         || dir.join("deno.jsonc").exists()
         || dir.join("import_map.json").exists()
     {
-        ecosystems.push(Ecosystem::Npm);
+        ecosystems.push(Ecosystem::Js);
     }
     ecosystems
 }
@@ -292,9 +292,9 @@ pub(crate) fn detect_all_ecosystems(dir: &Path) -> Vec<Ecosystem> {
 
 fn discover_files(root: &Path, ecosystem: Ecosystem) -> Vec<PathBuf> {
     let extensions: &[&str] = match ecosystem {
-        Ecosystem::Cargo => &["rs"],
+        Ecosystem::Rust => &["rs"],
         Ecosystem::Python => &["py"],
-        Ecosystem::Npm => &["ts", "tsx", "js", "jsx", "mjs"],
+        Ecosystem::Js => &["ts", "tsx", "js", "jsx", "mjs"],
         Ecosystem::Go => &["go"],
     };
 
@@ -365,7 +365,7 @@ fn extract_external_deps(
 ) -> HashMap<PathBuf, Vec<String>> {
     let mut result: HashMap<PathBuf, Vec<String>> = HashMap::new();
     let std_prefixes: HashSet<&str> = match ecosystem {
-        Ecosystem::Cargo => ["std", "core", "alloc", "proc_macro", "test"]
+        Ecosystem::Rust => ["std", "core", "alloc", "proc_macro", "test"]
             .iter()
             .copied()
             .collect(),
@@ -373,7 +373,7 @@ fn extract_external_deps(
             // Skip stdlib -- too many to list, focus on third-party.
             HashSet::new()
         }
-        Ecosystem::Npm | Ecosystem::Go => HashSet::new(),
+        Ecosystem::Js | Ecosystem::Go => HashSet::new(),
     };
 
     for file in files {
@@ -386,7 +386,7 @@ fn extract_external_deps(
         for line in content.lines() {
             let line = line.trim();
             match ecosystem {
-                Ecosystem::Cargo => {
+                Ecosystem::Rust => {
                     // `use foo::...` where foo is not crate/super/self/known
                     let use_part = strip_visibility(line)
                         .strip_prefix("use ")
@@ -430,7 +430,7 @@ fn extract_external_deps(
                         }
                     }
                 }
-                Ecosystem::Npm => {
+                Ecosystem::Js => {
                     for spec in extract_js_import_specifiers(line) {
                         if !spec.starts_with('.') && !spec.starts_with('@') {
                             let pkg = spec.split('/').next().unwrap_or(&spec);
@@ -1916,8 +1916,7 @@ fn detect_ffi_seams(root: &Path, files: &[PathBuf], ecosystems: &[Ecosystem]) ->
         }
 
         // NAPI: JS/TS -> Rust
-        if matches!(ext, "ts" | "tsx" | "js" | "jsx" | "mjs")
-            && ecosystems.contains(&Ecosystem::Npm)
+        if matches!(ext, "ts" | "tsx" | "js" | "jsx" | "mjs") && ecosystems.contains(&Ecosystem::Js)
         {
             if let Ok(content) = std::fs::read_to_string(file) {
                 for line in content.lines() {
@@ -2081,25 +2080,25 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
             .filter(|f| {
                 let ext = f.extension().and_then(|e| e.to_str()).unwrap_or("");
                 match eco {
-                    Ecosystem::Cargo => ext == "rs",
+                    Ecosystem::Rust => ext == "rs",
                     Ecosystem::Python => ext == "py",
-                    Ecosystem::Npm => matches!(ext, "ts" | "tsx" | "js" | "jsx" | "mjs"),
+                    Ecosystem::Js => matches!(ext, "ts" | "tsx" | "js" | "jsx" | "mjs"),
                     Ecosystem::Go => ext == "go",
                 }
             })
             .cloned()
             .collect();
         let eco_edges = match eco {
-            Ecosystem::Cargo => parse_rust_imports(&root, &eco_files),
+            Ecosystem::Rust => parse_rust_imports(&root, &eco_files),
             Ecosystem::Python => parse_python_imports(&root, &eco_files),
-            Ecosystem::Npm => parse_js_imports(&root, &eco_files),
+            Ecosystem::Js => parse_js_imports(&root, &eco_files),
             Ecosystem::Go => parse_go_imports(&root, &eco_files),
         };
         edges.extend(eco_edges);
     }
 
     // Cross-language seam edges (PyO3: Python -> Rust, NAPI: JS -> Rust).
-    if ecosystems.contains(&Ecosystem::Cargo) && ecosystems.len() > 1 {
+    if ecosystems.contains(&Ecosystem::Rust) && ecosystems.len() > 1 {
         edges.extend(detect_ffi_seams(&root, &included_files, &ecosystems));
     }
 
@@ -2107,7 +2106,7 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
     let mut internal_prefixes: HashSet<String> = HashSet::new();
     for eco in &ecosystems {
         match eco {
-            Ecosystem::Cargo => {
+            Ecosystem::Rust => {
                 let crate_roots = find_rust_crate_roots(&root);
                 for (_, name) in &crate_roots {
                     internal_prefixes.insert(name.clone());
@@ -2133,7 +2132,7 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
                     internal_prefixes.insert(mod_name);
                 }
             }
-            Ecosystem::Npm => {} // JS doesn't have a simple internal prefix
+            Ecosystem::Js => {} // JS doesn't have a simple internal prefix
         }
     }
     let external_deps_map = extract_external_deps(&included_files, ecosystem, &internal_prefixes);

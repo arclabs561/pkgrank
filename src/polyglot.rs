@@ -57,12 +57,12 @@ pub(crate) fn polyglot_analyze(
     metric: Metric,
 ) -> Result<(dep_graph::DepGraph, dep_graph::DepNodeMap, Vec<PolyglotRow>)> {
     let (packages, edges) = match ecosystem {
-        Ecosystem::Npm => parse_npm(path)?,
+        Ecosystem::Js => parse_npm(path)?,
         Ecosystem::Python => parse_python(path)?,
         Ecosystem::Go => parse_go_mod_graph(path)?,
-        Ecosystem::Cargo => {
+        Ecosystem::Rust => {
             return Err(anyhow!(
-                "Use `pkgrank analyze` for Cargo workspaces. The `polyglot` command is for npm, python, and go."
+                "Cargo workspaces use `cargo metadata` for richer analysis; run `pkgrank analyze` without --ecosystem"
             ));
         }
     };
@@ -213,7 +213,7 @@ pub(crate) fn parse_npm_lock(path: &Path) -> ParseResult {
             packages.push(DepNode {
                 name: name.to_string(),
                 version: entry.version.clone(),
-                ecosystem: Ecosystem::Npm,
+                ecosystem: Ecosystem::Js,
             });
         }
 
@@ -229,7 +229,7 @@ pub(crate) fn parse_npm_lock(path: &Path) -> ParseResult {
             packages.push(DepNode {
                 name: to.clone(),
                 version: None,
-                ecosystem: Ecosystem::Npm,
+                ecosystem: Ecosystem::Js,
             });
         }
     }
@@ -278,7 +278,7 @@ fn parse_npm_package_json(path: &Path) -> ParseResult {
     let mut packages = vec![DepNode {
         name: name.to_string(),
         version: version.map(|s| s.to_string()),
-        ecosystem: Ecosystem::Npm,
+        ecosystem: Ecosystem::Js,
     }];
     let mut edges = Vec::new();
 
@@ -289,7 +289,7 @@ fn parse_npm_package_json(path: &Path) -> ParseResult {
                 packages.push(DepNode {
                     name: dep_name.clone(),
                     version: ver,
-                    ecosystem: Ecosystem::Npm,
+                    ecosystem: Ecosystem::Js,
                 });
                 edges.push((name.to_string(), dep_name.clone()));
             }

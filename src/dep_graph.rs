@@ -6,8 +6,10 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Ecosystem {
-    Cargo,
-    Npm,
+    #[value(alias = "cargo")]
+    Rust,
+    #[value(alias = "npm")]
+    Js,
     Python,
     Go,
 }
@@ -15,8 +17,8 @@ pub(crate) enum Ecosystem {
 impl std::fmt::Display for Ecosystem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Cargo => write!(f, "cargo"),
-            Self::Npm => write!(f, "npm"),
+            Self::Rust => write!(f, "rust"),
+            Self::Js => write!(f, "js"),
             Self::Python => write!(f, "python"),
             Self::Go => write!(f, "go"),
         }

@@ -1245,6 +1245,7 @@ impl PkgrankStdioMcpFull {
             .transpose()?
             .unwrap_or(Metric::Pagerank);
         let analyze = AnalyzeArgs {
+            ecosystem: None,
             path: PathBuf::from(path),
             metric,
             top: params.0.top.unwrap_or(25),
@@ -1376,7 +1377,7 @@ impl PkgrankStdioMcpFull {
         let args = BlastRadiusArgs {
             package: params.0.package.clone(),
             path: PathBuf::from(params.0.path.as_deref().unwrap_or(".")),
-            ecosystem: dep_graph::Ecosystem::Cargo,
+            ecosystem: None,
             dev: params.0.dev.unwrap_or(false),
             build: params.0.build.unwrap_or(false),
             workspace_only: params.0.workspace_only.unwrap_or(true),
@@ -1424,12 +1425,12 @@ impl PkgrankStdioMcpFull {
         params: Parameters<PkgrankPolyglotToolArgs>,
     ) -> Result<CallToolResult, McpError> {
         let ecosystem = match params.0.ecosystem.as_str() {
-            "npm" => dep_graph::Ecosystem::Npm,
+            "js" | "npm" => dep_graph::Ecosystem::Js,
             "python" => dep_graph::Ecosystem::Python,
             "go" => dep_graph::Ecosystem::Go,
             other => {
                 return Err(McpError::invalid_params(
-                    format!("ecosystem must be one of: npm, python, go (got {other})"),
+                    format!("ecosystem must be one of: js, python, go (got {other})"),
                     None,
                 ));
             }
@@ -1468,12 +1469,12 @@ impl PkgrankStdioMcpFull {
             .ecosystem
             .as_deref()
             .map(|e| match e {
-                "cargo" => Ok(dep_graph::Ecosystem::Cargo),
-                "npm" => Ok(dep_graph::Ecosystem::Npm),
+                "rust" | "cargo" => Ok(dep_graph::Ecosystem::Rust),
+                "js" | "npm" => Ok(dep_graph::Ecosystem::Js),
                 "python" => Ok(dep_graph::Ecosystem::Python),
                 "go" => Ok(dep_graph::Ecosystem::Go),
                 other => Err(McpError::invalid_params(
-                    format!("ecosystem must be one of: cargo, npm, python, go (got {other})"),
+                    format!("ecosystem must be one of: rust, js, python, go (got {other})"),
                     None,
                 )),
             })

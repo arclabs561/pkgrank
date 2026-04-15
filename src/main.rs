@@ -1,12 +1,11 @@
-//! `pkgrank`: centrality scores over a Cargo dependency graph.
+//! `pkgrank`: centrality scores over dependency graphs.
 //!
-//! This is a workspace tool intended to answer a simple question:
-//! “Which crates are structurally central in the dependency DAG?”
+//! Ranks packages by structural importance (PageRank, betweenness, degree)
+//! in a dependency graph. Supports Cargo, npm, Python, and Go.
 //!
-//! We treat crates as nodes and direct dependency edges as directed edges:
-//! \[
-//!   A \to B \quad \text{iff crate A depends on crate B}
-//! \]
+//! Two axes of analysis:
+//! - **Inter-package**: which packages are most central in the dependency tree?
+//! - **Intra-project**: which source files are structural hotspots?
 
 use anyhow::{anyhow, Context, Result};
 use cargo_metadata::{
@@ -73,7 +72,7 @@ use graphops::{
 
 #[derive(Parser, Debug)]
 #[command(name = "pkgrank")]
-#[command(about = "Cargo dependency graph centrality analysis")]
+#[command(about = "Dependency graph centrality analysis (Cargo, npm, Python, Go)")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -104,7 +103,8 @@ enum Command {
     BlastRadius(BlastRadiusArgs),
     /// Combine cargo outdated with centrality ranking to prioritize upgrades.
     UpgradePriority(UpgradePriorityArgs),
-    /// Analyze a non-Cargo lock file (npm, Python uv.lock, Go go.mod).
+    /// [Deprecated] Use `pkgrank analyze --ecosystem <eco>` instead.
+    #[command(hide = true)]
     Polyglot(PolyglotArgs),
     /// Query the persistent SQLite store (populated by `pkgrank files --store`).
     Query(QueryArgs),
@@ -173,9 +173,20 @@ pub(crate) fn reverse_graph<N: Clone>(graph: &DiGraph<N, f64>) -> DiGraph<N, f64
 
 #[derive(Parser, Debug, Clone)]
 pub(crate) struct AnalyzeArgs {
-    /// Path to a `Cargo.toml`, or a directory containing one.
+    /// Path to a manifest file or directory containing one.
+    ///
+    /// Auto-detects ecosystem from directory contents (Cargo.toml, package-lock.json,
+    /// uv.lock, pyproject.toml, go.mod). Override with `--ecosystem`.
     #[arg(default_value = ".")]
     path: PathBuf,
+
+    /// Force a specific ecosystem instead of auto-detecting.
+    ///
+    /// By default, pkgrank checks the directory for manifest files and picks the
+    /// appropriate parser. Use this flag to override when auto-detection is wrong
+    /// or when multiple ecosystems coexist.
+    #[arg(long, value_enum)]
+    ecosystem: Option<Ecosystem>,
 
     /// Centrality metric to compute.
     #[arg(short, long, value_enum, default_value_t = Metric::Pagerank)]
@@ -858,7 +869,10 @@ fn main() -> Result<()> {
         Some(Command::Triage(args)) => ("triage", run_triage(&args)),
         Some(Command::BlastRadius(args)) => ("blast-radius", run_blast_radius(&args)),
         Some(Command::UpgradePriority(args)) => ("upgrade-priority", run_upgrade_priority(&args)),
-        Some(Command::Polyglot(args)) => ("polyglot", run_polyglot(&args)),
+        Some(Command::Polyglot(args)) => {
+            eprintln!("note: `pkgrank polyglot` is deprecated; use `pkgrank analyze --ecosystem {}` instead", args.ecosystem);
+            ("polyglot", run_polyglot(&args))
+        }
         Some(Command::Files(args)) => ("files", run_files(&args)),
         Some(Command::Query(args)) => ("query", run_query(&args)),
         Some(Command::McpStdio) => ("mcp-stdio", run_mcp_stdio()),
@@ -871,6 +885,24 @@ fn main() -> Result<()> {
 }
 
 fn run_analyze(args: &AnalyzeArgs) -> Result<()> {
+    // Detect ecosystem (explicit flag > auto-detect > fallback to Cargo for backwards compat).
+    let ecosystem = args
+        .ecosystem
+        .or_else(|| detect_ecosystem(&args.path))
+        .unwrap_or(Ecosystem::Rust);
+
+    if ecosystem != Ecosystem::Rust {
+        // Delegate to polyglot analysis path for non-Cargo ecosystems.
+        let polyglot_args = PolyglotArgs {
+            ecosystem,
+            path: args.path.clone(),
+            metric: args.metric,
+            top: args.top,
+            format: args.format,
+        };
+        return run_polyglot(&polyglot_args);
+    }
+
     let started_at = Instant::now();
     let manifest_path = manifest_path(&args.path)?;
     let t_metadata = Instant::now();
@@ -1840,6 +1872,7 @@ fn compute_tlc_crates(root: &Path, out_dir: &Path) -> Result<Vec<TlcCrateRow>> {
     //
     // This is a heuristic ranking, not a proof.
     let analyze = AnalyzeArgs {
+        ecosystem: None,
         path: root.to_path_buf(),
         metric: Metric::Pagerank,
         top: 25,
@@ -2205,6 +2238,7 @@ fn compute_repo_graph_from_live_metadata(
     //
     // For now we keep this aligned with pkgrank defaults: normal deps only.
     let analyze = AnalyzeArgs {
+        ecosystem: None,
         path: root.to_path_buf(),
         metric: Metric::Pagerank,
         top: 25,
@@ -2589,6 +2623,7 @@ fn write_recent_files_artifacts(
     // Build a best-effort crate-root map from workspace metadata.
     // We only need workspace member manifests and their directories.
     let analyze = AnalyzeArgs {
+        ecosystem: None,
         path: root.to_path_buf(),
         metric: Metric::Pagerank,
         top: 10,
@@ -2801,6 +2836,7 @@ fn run_sweep_local(args: &SweepLocalArgs) -> Result<()> {
         SweepMode::WorkspaceSlice => {
             // Run once on the root workspace.
             let analyze = AnalyzeArgs {
+                ecosystem: None,
                 path: root.clone(),
                 metric: Metric::Pagerank,
                 top: args.top,
@@ -2913,6 +2949,7 @@ fn run_sweep_local(args: &SweepLocalArgs) -> Result<()> {
                 }
 
                 let analyze = AnalyzeArgs {
+                    ecosystem: None,
                     path: repo_dir.clone(),
                     metric: Metric::Pagerank,
                     top: args.top,
@@ -3506,6 +3543,7 @@ fn run_cratesio(args: &CratesIoArgs) -> Result<()> {
     let mut seeds = args.seed.clone();
     if seeds.is_empty() {
         let analyze = AnalyzeArgs {
+            ecosystem: None,
             path: root.clone(),
             metric: Metric::Pagerank,
             top: 25,
@@ -3770,6 +3808,7 @@ fn run_view(args: &ViewArgs) -> Result<()> {
     // so origin labeling is actually visible in the combined view.
     let local_full_rows = if matches!(args.mode, ViewMode::Local | ViewMode::Both) {
         let analyze = AnalyzeArgs {
+            ecosystem: None,
             path: root.clone(),
             metric: Metric::Pagerank,
             top: 25,

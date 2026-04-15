@@ -77,6 +77,7 @@ pub(crate) fn compute_upgrade_priority(
 
     // 2. Build graph analysis.
     let analyze = AnalyzeArgs {
+        ecosystem: None,
         path: args.path.clone(),
         metric: Metric::Pagerank,
         top: 0,

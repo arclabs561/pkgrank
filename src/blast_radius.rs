@@ -17,9 +17,9 @@ pub(crate) struct BlastRadiusArgs {
     #[arg(default_value = ".")]
     pub path: PathBuf,
 
-    /// Ecosystem (default: cargo).
-    #[arg(long, value_enum, default_value_t = Ecosystem::Cargo)]
-    pub ecosystem: Ecosystem,
+    /// Ecosystem (auto-detected from directory if omitted).
+    #[arg(long, value_enum)]
+    pub ecosystem: Option<Ecosystem>,
 
     /// Include dev-dependencies (Cargo only).
     #[arg(long)]
@@ -133,14 +133,19 @@ where
 
 /// Compute blast radius for any ecosystem. Returns structured result.
 pub(crate) fn compute_blast_radius(args: &BlastRadiusArgs) -> Result<BlastRadiusResult> {
-    match args.ecosystem {
-        Ecosystem::Cargo => compute_blast_radius_cargo(args),
-        _ => compute_blast_radius_polyglot(args),
+    let ecosystem = args
+        .ecosystem
+        .or_else(|| detect_ecosystem(&args.path))
+        .unwrap_or(Ecosystem::Rust);
+    match ecosystem {
+        Ecosystem::Rust => compute_blast_radius_cargo(args),
+        _ => compute_blast_radius_polyglot(args, ecosystem),
     }
 }
 
 fn compute_blast_radius_cargo(args: &BlastRadiusArgs) -> Result<BlastRadiusResult> {
     let analyze = AnalyzeArgs {
+        ecosystem: None,
         path: args.path.clone(),
         metric: Metric::Pagerank,
         top: 0,
@@ -203,12 +208,15 @@ fn compute_blast_radius_cargo(args: &BlastRadiusArgs) -> Result<BlastRadiusResul
     Ok(result)
 }
 
-fn compute_blast_radius_polyglot(args: &BlastRadiusArgs) -> Result<BlastRadiusResult> {
-    let (packages, edges) = match args.ecosystem {
-        Ecosystem::Npm => crate::polyglot::parse_npm(&args.path)?,
+fn compute_blast_radius_polyglot(
+    args: &BlastRadiusArgs,
+    ecosystem: Ecosystem,
+) -> Result<BlastRadiusResult> {
+    let (packages, edges) = match ecosystem {
+        Ecosystem::Js => crate::polyglot::parse_npm(&args.path)?,
         Ecosystem::Python => crate::polyglot::parse_python(&args.path)?,
         Ecosystem::Go => crate::polyglot::parse_go_mod_graph(&args.path)?,
-        Ecosystem::Cargo => unreachable!(),
+        Ecosystem::Rust => unreachable!(),
     };
 
     let (graph, map) = dep_graph::build_dep_graph(&packages, &edges);
