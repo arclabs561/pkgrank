@@ -194,7 +194,9 @@ fn classify_js_file(path: &Path, project_root: &Path) -> FileRole {
         || rel_str.starts_with("__tests__/")
         || rel_str.contains("/__tests__/")
         || rel_str.starts_with("tests/")
+        || rel_str.contains("/tests/")
         || rel_str.starts_with("test/")
+        || rel_str.contains("/test/")
     {
         return FileRole::Test;
     }
@@ -308,7 +310,7 @@ fn discover_files(root: &Path, ecosystem: Ecosystem) -> Vec<PathBuf> {
     let extensions: &[&str] = match ecosystem {
         Ecosystem::Rust => &["rs"],
         Ecosystem::Python => &["py"],
-        Ecosystem::Js => &["ts", "tsx", "js", "jsx", "mjs"],
+        Ecosystem::Js => &["ts", "tsx", "js", "jsx", "mjs", "svelte", "vue"],
         Ecosystem::Go => &["go"],
     };
 
@@ -1543,24 +1545,37 @@ fn parse_js_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
 
         let dir = file.parent().unwrap_or(root);
 
-        for line in content.lines() {
+        // For Svelte/Vue files, only process imports inside <script> blocks.
+        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let effective_content: std::borrow::Cow<str> = if ext == "svelte" || ext == "vue" {
+            extract_script_block_content(&content).into()
+        } else {
+            std::borrow::Cow::Borrowed(&content)
+        };
+
+        for line in effective_content.lines() {
             let line = line.trim();
 
             for spec in extract_js_import_specifiers(line) {
                 // Resolve the import to a filesystem path.
                 let resolved = if spec.starts_with('.') {
                     resolve_js_import(dir, &spec, &file_set)
-                } else if let Some(abs_path) = resolve_alias_to_path(&spec, &path_aliases) {
-                    // Alias resolved to absolute path. Try with extensions.
-                    let parent = abs_path.parent().unwrap_or(root).to_path_buf();
-                    let fname = abs_path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    resolve_js_import(&parent, &format!("./{}", fname), &file_set)
                 } else {
-                    continue;
+                    // Try all alias candidates (bare package imports may resolve
+                    // to src/ or the package root, whichever has the index file).
+                    let candidates = resolve_alias_candidates(&spec, &path_aliases);
+                    if candidates.is_empty() {
+                        continue;
+                    }
+                    candidates.into_iter().find_map(|abs_path| {
+                        let parent = abs_path.parent().unwrap_or(root).to_path_buf();
+                        let fname = abs_path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string();
+                        resolve_js_import(&parent, &format!("./{}", fname), &file_set)
+                    })
                 };
 
                 if let Some(resolved) = resolved {
@@ -1736,30 +1751,77 @@ fn discover_workspace_packages(root: &Path, aliases: &mut Vec<(String, PathBuf)>
                 let pkg_dir = entry.path();
 
                 // Check for explicit "main" or "exports" to find src root.
-                let src_dir = if pkg_dir.join("src").is_dir() {
+                let has_src = pkg_dir.join("src").is_dir();
+                let src_dir = if has_src {
                     pkg_dir.join("src")
                 } else {
                     pkg_dir.clone()
                 };
 
                 aliases.push((format!("{}/", name), src_dir));
+                // Also push the pkg root so bare imports like `import 'react'`
+                // can resolve to `packages/react/index.js` when index.js is at
+                // the root (not in src/).
+                if has_src {
+                    aliases.push((format!("{}/", name), pkg_dir.clone()));
+                }
             }
         }
     }
 }
 
-fn resolve_alias_to_path(spec: &str, aliases: &[(String, PathBuf)]) -> Option<PathBuf> {
+/// Try all alias dirs for a bare package import and return candidates.
+/// Used when a package may have index files in multiple locations (src/ vs root).
+fn resolve_alias_candidates(spec: &str, aliases: &[(String, PathBuf)]) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    // Path imports.
     for (prefix, target_dir) in aliases {
         if let Some(rest) = spec.strip_prefix(prefix.as_str()) {
-            return Some(target_dir.join(rest));
-        }
-        // Bare package import: `@scope/pkg` matches alias `@scope/pkg/` → index file.
-        let bare = prefix.trim_end_matches('/');
-        if spec == bare {
-            return Some(target_dir.join("index"));
+            candidates.push(target_dir.join(rest));
+            return candidates; // Exact prefix match -- no ambiguity.
         }
     }
-    None
+    // Bare package imports: collect all matching dirs.
+    for (prefix, target_dir) in aliases {
+        let bare = prefix.trim_end_matches('/');
+        if spec == bare {
+            candidates.push(target_dir.join("index"));
+        }
+    }
+    candidates
+}
+
+/// Extract the content of `<script>` blocks from Svelte/Vue component files.
+/// Returns only the text inside `<script ...>...</script>` tags, stripping the tags themselves.
+/// Multiple script blocks are concatenated. Falls back to the full content if no script tags found.
+fn extract_script_block_content(content: &str) -> String {
+    let mut result = String::new();
+    let mut remaining = content;
+
+    while let Some(start) = remaining.find("<script") {
+        // Find the end of the opening tag.
+        let tag_body = &remaining[start..];
+        if let Some(tag_end) = tag_body.find('>') {
+            let script_content_start = start + tag_end + 1;
+            let rest = &remaining[script_content_start..];
+            if let Some(close) = rest.find("</script>") {
+                result.push_str(&rest[..close]);
+                result.push('\n');
+                remaining = &rest[close + "</script>".len()..];
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    if result.is_empty() {
+        // No script tags found; return full content (graceful fallback).
+        content.to_string()
+    } else {
+        result
+    }
 }
 
 fn extract_js_import_specifiers(line: &str) -> Vec<String> {
@@ -1819,7 +1881,7 @@ fn resolve_js_import(dir: &Path, spec: &str, file_set: &HashSet<PathBuf>) -> Opt
     let base = dir.join(spec);
 
     // Try exact path, then with extensions, then as directory/index.
-    let extensions = ["", ".ts", ".tsx", ".js", ".jsx", ".mjs"];
+    let extensions = ["", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".svelte", ".vue"];
 
     for ext in &extensions {
         let candidate = PathBuf::from(format!("{}{}", base.display(), ext));
@@ -1834,8 +1896,14 @@ fn resolve_js_import(dir: &Path, spec: &str, file_set: &HashSet<PathBuf>) -> Opt
         }
     }
 
-    // Try as directory: spec/index.{ts,tsx,js,jsx}
-    let dir_extensions = ["index.ts", "index.tsx", "index.js", "index.jsx"];
+    // Try as directory: spec/index.{ts,tsx,js,jsx,svelte}
+    let dir_extensions = [
+        "index.ts",
+        "index.tsx",
+        "index.js",
+        "index.jsx",
+        "index.svelte",
+    ];
     for idx in &dir_extensions {
         let candidate = base.join(idx);
         if let Ok(canonical) = candidate.canonicalize() {
@@ -2467,7 +2535,8 @@ fn detect_ffi_seams(root: &Path, files: &[PathBuf], ecosystems: &[Ecosystem]) ->
         }
 
         // NAPI: JS/TS -> Rust
-        if matches!(ext, "ts" | "tsx" | "js" | "jsx" | "mjs") && ecosystems.contains(&Ecosystem::Js)
+        if matches!(ext, "ts" | "tsx" | "js" | "jsx" | "mjs" | "svelte" | "vue")
+            && ecosystems.contains(&Ecosystem::Js)
         {
             if let Ok(content) = std::fs::read_to_string(file) {
                 for line in content.lines() {
@@ -2636,7 +2705,9 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
                 match eco {
                     Ecosystem::Rust => ext == "rs",
                     Ecosystem::Python => ext == "py",
-                    Ecosystem::Js => matches!(ext, "ts" | "tsx" | "js" | "jsx" | "mjs"),
+                    Ecosystem::Js => {
+                        matches!(ext, "ts" | "tsx" | "js" | "jsx" | "mjs" | "svelte" | "vue")
+                    }
                     Ecosystem::Go => ext == "go",
                 }
             })
