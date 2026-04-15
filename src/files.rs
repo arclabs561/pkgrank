@@ -365,6 +365,9 @@ fn discover_files_git(root: &Path, extensions: &[&str]) -> Option<Vec<PathBuf>> 
                 "gen/",
                 "third_party/",
                 "third-party/",
+                "docs/",
+                "doc/",
+                "fuzz/",
             ];
             !skip_dirs.iter().any(|d| l.contains(d))
         })
