@@ -19,9 +19,16 @@ astral-sh/ruff           rust    400
 
 # Go
 gin-gonic/gin            go      50
+gohugoio/hugo            go      400
+junegunn/fzf             go      50
+cli/cli                  go      400
 
 # Polyglot / monorepo (needs --ecosystem)
 vercel/next.js           js      15000
 
-# Non-GitHub (full URL)
-# https://gitlab.com/gitlab-org/gitlab-runner  go  (requires large clone)
+# Non-GitHub platforms (full URL required)
+https://codeberg.org/forgejo/forgejo.git         go      1500
+https://git.sr.ht/~sircmpwn/aerc                go      100
+
+# Tangled (AT Protocol code hosting)
+# https://tangled.org/tangled.org/core.git       go      400
