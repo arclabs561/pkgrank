@@ -1952,6 +1952,151 @@ fn resolve_js_import(dir: &Path, spec: &str, file_set: &HashSet<PathBuf>) -> Opt
 // ---------------------------------------------------------------------------
 
 fn parse_go_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
+    // Try `go list -json` for correct, build-tag-aware, alias-aware import resolution.
+    // Requires Go toolchain + module download. Falls back to text parsing.
+    if let Some(edges) = parse_go_imports_golist(root, files) {
+        return edges;
+    }
+    parse_go_imports_text(root, files)
+}
+
+/// Use `go list -json ./...` for correct import resolution.
+fn parse_go_imports_golist(root: &Path, files: &[PathBuf]) -> Option<Vec<FileEdge>> {
+    // Ensure modules are available (shallow clones won't have them).
+    let dl = ProcessCommand::new("go")
+        .args(["mod", "download"])
+        .current_dir(root)
+        .stderr(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .status();
+    if dl.map(|s| !s.success()).unwrap_or(true) {
+        return None;
+    }
+
+    let out = ProcessCommand::new("go")
+        .args(["list", "-e", "-json", "./..."])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if stdout.trim().is_empty() {
+        return None;
+    }
+
+    let module_name = read_go_module_name(root);
+    if module_name.is_empty() {
+        return None;
+    }
+
+    // Parse concatenated JSON objects (go list outputs one object per package, not an array).
+    #[derive(Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct GoPackage {
+        import_path: Option<String>,
+        #[serde(default)]
+        dir: String,
+        #[serde(default)]
+        go_files: Vec<String>,
+        #[serde(default)]
+        imports: Vec<String>,
+    }
+
+    let mut packages: Vec<GoPackage> = Vec::new();
+    // Use serde_json StreamDeserializer for concatenated JSON.
+    for result in serde_json::Deserializer::from_str(&stdout).into_iter::<GoPackage>() {
+        match result {
+            Ok(pkg) => packages.push(pkg),
+            Err(_) => continue,
+        }
+    }
+
+    // Need enough packages to be useful (go list may partially fail).
+    if packages.len() < 2 {
+        return None;
+    }
+
+    let file_set: HashSet<PathBuf> = files.iter().cloned().collect();
+
+    // Map: import path → (canonical file, all files in package).
+    let mut pkg_canonical: HashMap<String, PathBuf> = HashMap::new();
+    let mut pkg_to_files: HashMap<String, Vec<PathBuf>> = HashMap::new();
+
+    for pkg in &packages {
+        let import_path = match &pkg.import_path {
+            Some(ip) => ip.clone(),
+            None => continue,
+        };
+        let pkg_dir = PathBuf::from(&pkg.dir);
+
+        let go_files: Vec<PathBuf> = pkg
+            .go_files
+            .iter()
+            .map(|f| pkg_dir.join(f))
+            .filter(|f| file_set.contains(f))
+            .collect();
+
+        if let Some(canonical) = go_files.first().cloned() {
+            pkg_canonical.insert(import_path.clone(), canonical);
+        }
+        if !go_files.is_empty() {
+            pkg_to_files.insert(import_path, go_files);
+        }
+    }
+
+    let mut edges = Vec::new();
+
+    // Cross-package edges from resolved Imports.
+    for pkg in &packages {
+        let import_path = match &pkg.import_path {
+            Some(ip) => ip,
+            None => continue,
+        };
+        let from_files = match pkg_to_files.get(import_path.as_str()) {
+            Some(f) => f,
+            None => continue,
+        };
+        for imp in &pkg.imports {
+            if !imp.starts_with(&module_name) {
+                continue;
+            }
+            if let Some(target) = pkg_canonical.get(imp.as_str()) {
+                for from_file in from_files {
+                    if from_file != target {
+                        edges.push(FileEdge {
+                            from: from_file.clone(),
+                            to: target.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Intra-package edges: files in the same package share a namespace.
+    for (pkg_path, pkg_files) in &pkg_to_files {
+        if let Some(canonical) = pkg_canonical.get(pkg_path.as_str()) {
+            for f in pkg_files {
+                if f != canonical {
+                    edges.push(FileEdge {
+                        from: f.clone(),
+                        to: canonical.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    if edges.is_empty() {
+        return None; // Fall back to text parser.
+    }
+    Some(edges)
+}
+
+/// Fallback: text-based Go import parsing (when Go toolchain is not available).
+fn parse_go_imports_text(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
     let module_name = read_go_module_name(root);
 
     let mut pkg_to_files: HashMap<String, Vec<PathBuf>> = HashMap::new();
