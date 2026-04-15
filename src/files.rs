@@ -312,10 +312,55 @@ fn discover_files(root: &Path, ecosystem: Ecosystem) -> Vec<PathBuf> {
         Ecosystem::Go => &["go"],
     };
 
+    // Prefer `git ls-files` to respect .gitignore (skips generated/vendored files).
+    if let Some(files) = discover_files_git(root, extensions) {
+        if !files.is_empty() {
+            return files;
+        }
+    }
+
+    // Fallback: manual walk with heuristic excludes.
     let mut files = Vec::new();
     walk_dir(root, extensions, &mut files);
     files.sort();
     files
+}
+
+/// Use `git ls-files` to discover tracked source files (respects .gitignore).
+fn discover_files_git(root: &Path, extensions: &[&str]) -> Option<Vec<PathBuf>> {
+    let out = ProcessCommand::new("git")
+        .args(["ls-files", "--cached", "--others", "--exclude-standard"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let files: Vec<PathBuf> = stdout
+        .lines()
+        .filter(|l| !l.is_empty())
+        .filter(|l| {
+            l.rsplit('.')
+                .next()
+                .map(|ext| extensions.contains(&ext))
+                .unwrap_or(false)
+        })
+        .filter(|l| {
+            // Skip generated files even if tracked.
+            let fname = l.rsplit('/').next().unwrap_or(l);
+            !fname.ends_with(".pb.go")
+                && !fname.ends_with("_generated.go")
+                && !fname.ends_with(".gen.go")
+                && !fname.ends_with(".generated.ts")
+                && !fname.ends_with(".generated.js")
+                && !fname.ends_with("_pb2.py")
+                && !fname.ends_with("_pb2_grpc.py")
+                && !fname.starts_with("generated_")
+        })
+        .map(|l| root.join(l))
+        .collect();
+    Some(files)
 }
 
 fn walk_dir(dir: &Path, extensions: &[&str], out: &mut Vec<PathBuf>) {
@@ -338,6 +383,7 @@ fn walk_dir(dir: &Path, extensions: &[&str], out: &mut Vec<PathBuf>) {
                     | ".pytest_cache"
                     | "dist"
                     | "build"
+                    | "out"
                     | ".next"
                     | ".vercel"
                     | ".nuxt"
@@ -348,14 +394,49 @@ fn walk_dir(dir: &Path, extensions: &[&str], out: &mut Vec<PathBuf>) {
                     | ".venv"
                     | "venv"
                     | ".tox"
+                    | ".nox"
                     | "archive"
+                    | ".eggs"
+                    | "*.egg-info"
+                    | "testdata"
+                    | "fixtures"
+                    | "migrations"
+                    | "assets"
+                    | "static"
+                    | "public"
+                    | "templates"
+                    | "generated"
+                    | "gen"
+                    | "proto"
+                    | "third_party"
+                    | "third-party"
+                    | "external"
+                    | "docs"
+                    | "doc"
+                    | "site"
+                    | ".cache"
+                    | ".parcel-cache"
+                    | ".turbo"
+                    | "storybook-static"
             ) {
                 continue;
             }
             walk_dir(&path, extensions, out);
         } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             if extensions.contains(&ext) {
-                out.push(path);
+                let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                // Skip generated files.
+                let is_generated = fname.ends_with(".pb.go")      // protobuf
+                    || fname.ends_with("_generated.go")
+                    || fname.ends_with(".gen.go")
+                    || fname.ends_with(".generated.ts")
+                    || fname.ends_with(".generated.js")
+                    || fname.ends_with("_pb2.py")                 // protobuf Python
+                    || fname.ends_with("_pb2_grpc.py")
+                    || fname.starts_with("generated_");
+                if !is_generated {
+                    out.push(path);
+                }
             }
         }
     }
@@ -561,7 +642,55 @@ fn extract_external_deps(
         .iter()
         .copied()
         .collect(),
-        Ecosystem::Js | Ecosystem::Go => HashSet::new(),
+        Ecosystem::Js => [
+            // Node.js built-in modules (commonly imported without node: prefix)
+            "assert",
+            "async_hooks",
+            "buffer",
+            "child_process",
+            "cluster",
+            "console",
+            "constants",
+            "crypto",
+            "dgram",
+            "diagnostics_channel",
+            "dns",
+            "domain",
+            "events",
+            "fs",
+            "http",
+            "http2",
+            "https",
+            "inspector",
+            "module",
+            "net",
+            "os",
+            "path",
+            "perf_hooks",
+            "process",
+            "punycode",
+            "querystring",
+            "readline",
+            "repl",
+            "stream",
+            "string_decoder",
+            "sys",
+            "timers",
+            "tls",
+            "trace_events",
+            "tty",
+            "url",
+            "util",
+            "v8",
+            "vm",
+            "wasi",
+            "worker_threads",
+            "zlib",
+        ]
+        .iter()
+        .copied()
+        .collect(),
+        Ecosystem::Go => HashSet::new(), // Go stdlib detected by absence of dots in import path
     };
 
     for file in files {
@@ -621,9 +750,15 @@ fn extract_external_deps(
                 }
                 Ecosystem::Js => {
                     for spec in extract_js_import_specifiers(line) {
+                        // Skip node: prefixed imports
+                        if spec.starts_with("node:") {
+                            continue;
+                        }
                         if !spec.starts_with('.') && !spec.starts_with('@') {
                             let pkg = spec.split('/').next().unwrap_or(&spec);
-                            deps.insert(pkg.to_string());
+                            if !std_prefixes.contains(pkg) {
+                                deps.insert(pkg.to_string());
+                            }
                         } else if spec.starts_with("@") {
                             // Scoped package: @scope/pkg
                             let parts: Vec<&str> = spec.splitn(3, '/').collect();
@@ -635,11 +770,16 @@ fn extract_external_deps(
                 }
                 Ecosystem::Go => {
                     if let Some(import_path) = extract_go_import(line) {
-                        if !internal_prefixes
-                            .iter()
-                            .any(|p| import_path.starts_with(p.as_str()))
+                        // Go stdlib has no dots in the first path segment (fmt, os, net/http).
+                        // Third-party always has a domain (github.com/..., golang.org/x/...).
+                        let first_seg = import_path.split('/').next().unwrap_or("");
+                        let is_stdlib = !first_seg.contains('.');
+                        if !is_stdlib
+                            && !internal_prefixes
+                                .iter()
+                                .any(|p| import_path.starts_with(p.as_str()))
                         {
-                            // Use the first two segments as the package identifier.
+                            // Use the first three segments as the package identifier.
                             let parts: Vec<&str> = import_path.splitn(4, '/').collect();
                             if parts.len() >= 3 {
                                 deps.insert(format!("{}/{}/{}", parts[0], parts[1], parts[2]));
@@ -3137,7 +3277,7 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
             std::io::stdin()
                 .lock()
                 .lines()
-                .filter_map(|l| l.ok())
+                .map_while(|l| l.ok())
                 .map(|l| l.trim().to_string())
                 .filter(|l| !l.is_empty())
                 .collect()
