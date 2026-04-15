@@ -8,9 +8,20 @@ Two axes of analysis:
 
 ## Install
 
+Pre-built binaries (no Rust toolchain required):
+
+```bash
+# macOS / Linux
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/arclabs561/pkgrank/releases/latest/download/pkgrank-installer.sh | sh
+
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://github.com/arclabs561/pkgrank/releases/latest/download/pkgrank-installer.ps1 | iex"
+```
+
+Or via Cargo:
+
 ```bash
 cargo install pkgrank
-pkgrank --help
 ```
 
 ## Quick start
