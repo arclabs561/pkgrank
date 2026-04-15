@@ -846,9 +846,16 @@ fn parse_rust_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
 
     for (crate_dir, crate_name) in &crate_roots {
         known_crates.insert(crate_name.clone());
-        let src_dir = crate_dir.join("src");
+        // Standard layout: src/ under crate dir. Custom layout: source at crate dir itself.
+        let src_dir = {
+            let standard = crate_dir.join("src");
+            if standard.is_dir() {
+                standard
+            } else {
+                crate_dir.clone()
+            }
+        };
         for file in files {
-            // Only map files that are actually under this crate's src/.
             if !file.starts_with(&src_dir) {
                 continue;
             }
@@ -1007,9 +1014,25 @@ fn find_rust_crate_roots(root: &Path) -> Vec<(PathBuf, String)> {
     // Check if root itself is a crate.
     let root_cargo = root.join("Cargo.toml");
     if root_cargo.exists() {
-        let src = root.join("src");
-        if src.is_dir() {
-            roots.push((root.to_path_buf(), read_rust_crate_name(root)));
+        roots.push((root.to_path_buf(), read_rust_crate_name(root)));
+        // Also check for custom binary paths (e.g., `path = "crates/core/main.rs"`).
+        // These create a "virtual crate" whose source root is the directory containing the entry point.
+        if let Ok(raw) = std::fs::read_to_string(&root_cargo) {
+            if let Ok(val) = raw.parse::<toml::Value>() {
+                let crate_name = read_rust_crate_name(root);
+                if let Some(bins) = val.get("bin").and_then(|b| b.as_array()) {
+                    for bin in bins {
+                        if let Some(path) = bin.get("path").and_then(|p| p.as_str()) {
+                            let full = root.join(path);
+                            if let Some(dir) = full.parent() {
+                                if dir.is_dir() && dir != root.join("src") && dir != root {
+                                    roots.push((dir.to_path_buf(), crate_name.clone()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
