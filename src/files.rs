@@ -2681,6 +2681,23 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
     let fmt = effective_format(args.format);
     match fmt {
         OutputFormat::Json => {
+            let layer_violations = compute_layer_violations(&result);
+            let project_dir = if is_url(&args.path) {
+                PathBuf::from(".")
+            } else {
+                let p = PathBuf::from(&args.path);
+                if p.is_file() {
+                    p.parent().unwrap_or(Path::new(".")).to_path_buf()
+                } else {
+                    p
+                }
+            };
+            let arch_rules = load_arch_rules(&project_dir);
+            let rule_violations = arch_rules
+                .as_ref()
+                .map(|r| check_arch_rules(r, &result.direct_edges))
+                .unwrap_or_default();
+
             #[derive(Serialize)]
             struct Out {
                 schema_version: u32,
@@ -2692,6 +2709,10 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                 orphan_count: usize,
                 cycle_count: usize,
                 cycles: Vec<Vec<String>>,
+                layer_violation_count: usize,
+                layer_violations: Vec<LayerViolation>,
+                rule_violation_count: usize,
+                rule_violations: Vec<RuleViolation>,
                 rows_total: usize,
                 rows_returned: usize,
                 rows: Vec<FileRow>,
@@ -2708,6 +2729,10 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                 orphan_count: result.orphan_count,
                 cycle_count: result.cycles.len(),
                 cycles: result.cycles.clone(),
+                layer_violation_count: layer_violations.len(),
+                layer_violations,
+                rule_violation_count: rule_violations.len(),
+                rule_violations,
                 rows_total,
                 rows_returned: rows.len(),
                 rows,
@@ -2928,7 +2953,20 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
 
     // Affected mode: show files transitively affected by changed files.
     if let Some(changed) = &args.affected {
-        let affected = compute_affected(&result, changed);
+        // If the only argument is "-", read file list from stdin (one per line).
+        let changed = if changed.len() == 1 && changed[0] == "-" {
+            use std::io::BufRead;
+            std::io::stdin()
+                .lock()
+                .lines()
+                .filter_map(|l| l.ok())
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        } else {
+            changed.clone()
+        };
+        let affected = compute_affected(&result, &changed);
         if affected.is_empty() {
             eprintln!("no affected files found for: {}", changed.join(", "));
         } else {
