@@ -3,7 +3,7 @@
 Ranks nodes in a dependency graph by structural importance (PageRank, betweenness, degree).
 
 Two axes of analysis:
-- **File-level** (`files`): which source files are structural hotspots, forming cycles, or high churn risk? Polyglot (Rust, Python, JS/TS, Go), works on any local path or GitHub URL.
+- **File-level** (`files`): which source files are structural hotspots, forming cycles, or high churn risk? Polyglot (Rust, Python, JS/TS/Svelte/Vue, Go), works on any git-cloneable URL.
 - **Package-level** (`analyze`): which packages in a dependency tree are most central, most depended-on, most risky to change? Supports Cargo, npm, Python, and Go.
 
 ## Install
@@ -27,15 +27,17 @@ cargo install pkgrank
 ## Quick start
 
 ```bash
-# File-level: structural hotspots in any project (no toolchain needed)
+# File-level: structural hotspots in any project
 pkgrank files .
 pkgrank files tokio-rs/tokio
 pkgrank files https://github.com/fastapi/fastapi
 
-# Works with any git forge (GitLab, Codeberg, SourceHut, Bitbucket, Tangled)
-pkgrank files gl:inkscape/inkscape
-pkgrank files cb:forgejo/forgejo
-pkgrank files sh:~sircmpwn/aerc
+# Works with any git forge
+pkgrank files gl:inkscape/inkscape          # GitLab
+pkgrank files cb:forgejo/forgejo            # Codeberg
+pkgrank files sh:~sircmpwn/aerc             # SourceHut
+pkgrank files bb:atlassian/stash            # Bitbucket
+pkgrank files tg:tangled.org/core           # Tangled
 
 # File-level with git churn risk overlay
 pkgrank files . --git
@@ -51,6 +53,7 @@ pkgrank files . --fail-on-violation
 
 # What files are affected by a change?
 pkgrank files . --affected src/parser.rs
+git diff --name-only | pkgrank files . --affected -
 
 # Package-level: rank dependencies by importance (auto-detects ecosystem)
 pkgrank analyze
@@ -67,15 +70,20 @@ pkgrank upgrade-priority
 
 ## File-level analysis (`pkgrank files`)
 
-Analyze the import graph within a project. Static parsing (no toolchain required). Works across Rust, Python, JS/TS, and Go.
+Analyze the import graph within a project. Works across Rust, Python, JS/TS (including Svelte and Vue components), and Go.
+
+For Go projects, uses `go list -json` for correct build-tag-aware import resolution when the Go toolchain is available. Falls back to static text parsing otherwise. For all other ecosystems, uses static parsing with no toolchain required.
+
+Respects `.gitignore` via `git ls-files` (falls back to heuristic walk for non-git dirs). Automatically excludes generated files (`.pb.go`, `_pb2.py`, `.d.ts`), locale data, test fixtures, vendor directories, and docs.
 
 ```bash
 # Any local project (ecosystem auto-detected)
 pkgrank files .
 
-# Any GitHub repo via URL or shorthand
+# Any repo via URL or shorthand (owner/repo defaults to GitHub)
 pkgrank files tokio-rs/tokio
-pkgrank files https://github.com/django/django
+pkgrank files https://gitlab.com/inkscape/inkscape
+pkgrank files cb:forgejo/forgejo
 
 # Git churn risk: combine structural centrality with change frequency
 pkgrank files . --git
@@ -97,6 +105,7 @@ pkgrank files . --fail-on-violation
 
 # Affected files: what breaks if these files change?
 pkgrank files . --affected src/graph.rs,src/index.rs
+git diff --name-only | pkgrank files . --affected -
 ```
 
 Output includes:
@@ -109,7 +118,7 @@ Output includes:
 - **Bus factor** (`--git`): unique contributors per file
 - **Co-change coupling** (`--git`): files that change together in commits
 - **Layer violations**: detects when stable files import from unstable files (Clean Architecture dependency rule)
-- **External deps**: which third-party packages each file imports
+- **External deps**: which third-party packages each file imports (stdlib filtered)
 
 Cross-project queries via SQLite (auto-enabled):
 
@@ -237,7 +246,9 @@ pkgrank modules-sweep --manifest-path ../Cargo.toml -p walk -p innr --lib
 
 CLI defaults include types + traits (functions hidden). MCP defaults are more conservative; use `preset` like `file-api` or `file-full` for the CLI-like view.
 
-## JSON output shape (stable wrapper)
+## Output format
+
+Default: auto-detect (text on TTY, JSON when piped). Override with `--format text` or `--format json`.
 
 For commands that support `--format json`, the JSON is wrapped for forwards-compatible parsing:
 
@@ -245,14 +256,12 @@ For commands that support `--format json`, the JSON is wrapped for forwards-comp
 {
   "schema_version": 1,
   "ok": true,
-  "command": "analyze|modules|modules-sweep|cratesio",
-  "rows": [ /* ... */ ]
+  "command": "files",
+  "rows": [ ... ]
 }
 ```
 
-## Auto-JSON when piped
-
-When stdout is not a TTY, output defaults to JSON. This makes pkgrank composable with `jq` without requiring `--format json`.
+`pkgrank files` JSON also includes `layer_violation_count`, `rule_violation_count`, and their details.
 
 ## MCP stdio server
 
@@ -263,23 +272,11 @@ Toolset selection:
 - `PKGRANK_MCP_TOOLSET=full`: advanced tools (module/type graph, polyglot, files)
 - `PKGRANK_MCP_TOOLSET=debug`: internal artifact-inspection tools
 
-## Configurable invariant rules
-
-Cross-axis dependency rules are loaded from `dev_repos_overview.json` (under `--root` at `evals/arch/dev_repos_overview.json`). Add a `forbidden_edges` array:
-
-```json
-{
-  "axes": { "core": ["libfoo", "libbar"], "apps": ["myapp"] },
-  "forbidden_edges": [
-    { "from": "core", "to": "apps" }
-  ]
-}
-```
-
 ## Tests
 
 - Default test suite is offline/deterministic, uses local targets.
 - URL-backed tests (crates.io crawl) require `PKGRANK_E2E_NETWORK=1`.
+- `tests/test_repos.txt` lists 15+ real-world repos for regression testing across all ecosystems and forges.
 
 ## Non-goals
 
