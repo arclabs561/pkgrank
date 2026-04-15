@@ -30,6 +30,12 @@ pkgrank files . --focus main.rs
 # Directory-level aggregation for large codebases
 pkgrank files astral-sh/ruff --directory
 
+# CI gate: fail on architectural violations
+pkgrank files . --fail-on-violation
+
+# What files are affected by a change?
+pkgrank files . --affected src/parser.rs
+
 # Package-level: rank dependencies by importance (auto-detects ecosystem)
 pkgrank analyze
 pkgrank analyze path/to/npm-project
@@ -69,6 +75,12 @@ pkgrank files . --include-tests
 
 # Cache results for repeated queries
 pkgrank files . --cache
+
+# CI: fail if cycles or layer violations exist
+pkgrank files . --fail-on-violation
+
+# Affected files: what breaks if these files change?
+pkgrank files . --affected src/graph.rs,src/index.rs
 ```
 
 Output includes:

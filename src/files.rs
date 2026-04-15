@@ -71,6 +71,20 @@ pub(crate) struct FilesArgs {
     /// Persist results to SQLite database for cross-project queries (default: true).
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub store: bool,
+
+    /// Exit with code 1 if layer violations or cycles are detected.
+    ///
+    /// Use in CI to enforce architectural rules.
+    #[arg(long, default_value_t = false)]
+    pub fail_on_violation: bool,
+
+    /// Show files transitively affected by changes to the given files.
+    ///
+    /// Accepts comma-separated file paths (relative to project root).
+    /// Outputs all files that transitively depend on the changed files.
+    /// Useful for CI: only run tests for affected modules.
+    #[arg(long, value_delimiter = ',')]
+    pub affected: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1688,6 +1702,106 @@ pub(crate) struct FilesResult {
     pub direct_edges: Vec<(String, String)>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct LayerViolation {
+    pub from: String,
+    pub to: String,
+    pub from_instability: f64,
+    pub to_instability: f64,
+}
+
+/// Compute layer violations: stable files (low I) importing unstable files (high I).
+pub(crate) fn compute_layer_violations(result: &FilesResult) -> Vec<LayerViolation> {
+    let file_instability: HashMap<&str, f64> = result
+        .rows
+        .iter()
+        .map(|r| (r.file.as_str(), r.instability))
+        .collect();
+    let mut violations = Vec::new();
+    for (from, to) in &result.direct_edges {
+        let from_i = file_instability.get(from.as_str()).copied().unwrap_or(0.5);
+        let to_i = file_instability.get(to.as_str()).copied().unwrap_or(0.5);
+        // Skip mod.rs/lib.rs/index.ts → sibling edges (module tree structure).
+        let from_base = std::path::Path::new(from)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("");
+        let same_dir = std::path::Path::new(from).parent() == std::path::Path::new(to).parent();
+        let is_mod_reexport = (from_base == "mod.rs"
+            || from_base == "lib.rs"
+            || from_base == "__init__.py"
+            || from_base == "index.ts"
+            || from_base == "index.js")
+            && same_dir;
+        if from_i < 0.3 && to_i > 0.7 && !is_mod_reexport {
+            violations.push(LayerViolation {
+                from: from.clone(),
+                to: to.clone(),
+                from_instability: from_i,
+                to_instability: to_i,
+            });
+        }
+    }
+    violations.sort_by(|a, b| {
+        (b.to_instability - b.from_instability).total_cmp(&(a.to_instability - a.from_instability))
+    });
+    violations
+}
+
+/// Compute transitively affected files from a set of changed files.
+///
+/// Does reverse BFS on the import graph: if A imports B and B changed,
+/// A is affected (because its dependency changed).
+pub(crate) fn compute_affected(result: &FilesResult, changed: &[String]) -> Vec<String> {
+    // Build reverse adjacency list: to -> [from] (who imports this file).
+    let mut reverse_adj: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (from, to) in &result.direct_edges {
+        reverse_adj
+            .entry(to.as_str())
+            .or_default()
+            .push(from.as_str());
+    }
+
+    // Normalize changed file paths: try matching by suffix against known files.
+    let known_files: HashSet<&str> = result.rows.iter().map(|r| r.file.as_str()).collect();
+    let mut seeds: HashSet<&str> = HashSet::new();
+    for ch in changed {
+        let ch = ch.trim();
+        if known_files.contains(ch) {
+            seeds.insert(ch);
+        } else {
+            // Try suffix match (user may pass "src/main.rs" when graph has "main.rs" or vice versa).
+            for &f in &known_files {
+                if f.ends_with(ch) || ch.ends_with(f) {
+                    seeds.insert(f);
+                }
+            }
+        }
+    }
+
+    // BFS from seeds through reverse edges.
+    let mut visited: HashSet<&str> = seeds.clone();
+    let mut queue: std::collections::VecDeque<&str> = seeds.iter().copied().collect();
+    while let Some(node) = queue.pop_front() {
+        if let Some(dependents) = reverse_adj.get(node) {
+            for &dep in dependents {
+                if visited.insert(dep) {
+                    queue.push_back(dep);
+                }
+            }
+        }
+    }
+
+    // Return affected files (excluding the seeds themselves).
+    let mut affected: Vec<String> = visited
+        .into_iter()
+        .filter(|f| !seeds.contains(f))
+        .map(|f| f.to_string())
+        .collect();
+    affected.sort();
+    affected
+}
+
 // ---------------------------------------------------------------------------
 // Core analysis
 // ---------------------------------------------------------------------------
@@ -2613,41 +2727,17 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                 }
 
                 // Layer violations: stable files importing from unstable files.
-                // The dependency rule (Clean Architecture): deps should point toward stability.
-                let file_instability: HashMap<&str, f64> = result
-                    .rows
-                    .iter()
-                    .map(|r| (r.file.as_str(), r.instability))
-                    .collect();
-                let mut violations: Vec<(&str, &str, f64, f64)> = Vec::new();
-                for (from, to) in &result.direct_edges {
-                    let from_i = file_instability.get(from.as_str()).copied().unwrap_or(0.5);
-                    let to_i = file_instability.get(to.as_str()).copied().unwrap_or(0.5);
-                    // Violation: stable file (low I) imports from unstable file (high I).
-                    // Skip mod.rs → sibling edges (module tree structure, not real violations).
-                    let from_base = Path::new(from)
-                        .file_name()
-                        .and_then(|f| f.to_str())
-                        .unwrap_or("");
-                    let same_dir = Path::new(from).parent() == Path::new(to).parent();
-                    let is_mod_reexport = (from_base == "mod.rs"
-                        || from_base == "lib.rs"
-                        || from_base == "__init__.py"
-                        || from_base == "index.ts"
-                        || from_base == "index.js")
-                        && same_dir;
-                    if from_i < 0.3 && to_i > 0.7 && !is_mod_reexport {
-                        violations.push((from.as_str(), to.as_str(), from_i, to_i));
-                    }
-                }
+                let violations = compute_layer_violations(&result);
                 if !violations.is_empty() {
-                    violations.sort_by(|a, b| (b.3 - b.2).total_cmp(&(a.3 - a.2)));
                     println!(
                         "\nlayer violations ({}, stable -> unstable):",
                         violations.len()
                     );
-                    for (from, to, fi, ti) in violations.iter().take(5) {
-                        println!("  {} (I={:.2}) -> {} (I={:.2})", from, fi, to, ti);
+                    for v in violations.iter().take(5) {
+                        println!(
+                            "  {} (I={:.2}) -> {} (I={:.2})",
+                            v.from, v.from_instability, v.to, v.to_instability
+                        );
                     }
                 }
 
@@ -2735,6 +2825,61 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
     // Focus mode: show detailed info about a specific file.
     if let Some(focus) = &args.focus {
         print_focus(focus, &result);
+    }
+
+    // Affected mode: show files transitively affected by changed files.
+    if let Some(changed) = &args.affected {
+        let affected = compute_affected(&result, changed);
+        if affected.is_empty() {
+            eprintln!("no affected files found for: {}", changed.join(", "));
+        } else {
+            let fmt = effective_format(args.format);
+            match fmt {
+                OutputFormat::Json => {
+                    #[derive(Serialize)]
+                    struct AffectedOut {
+                        changed: Vec<String>,
+                        affected_count: usize,
+                        affected: Vec<String>,
+                    }
+                    let out = AffectedOut {
+                        changed: changed.clone(),
+                        affected_count: affected.len(),
+                        affected,
+                    };
+                    println!("{}", serde_json::to_string_pretty(&out)?);
+                }
+                OutputFormat::Text => {
+                    println!(
+                        "\naffected by [{}] ({} files):",
+                        changed.join(", "),
+                        affected.len()
+                    );
+                    for f in &affected {
+                        println!("  {}", f);
+                    }
+                }
+            }
+        }
+    }
+
+    // CI mode: fail if violations detected.
+    if args.fail_on_violation {
+        let violations = compute_layer_violations(&result);
+        let cycle_count = result.cycles.len();
+        if !violations.is_empty() || cycle_count > 0 {
+            let mut parts = Vec::new();
+            if !violations.is_empty() {
+                parts.push(format!("{} layer violations", violations.len()));
+            }
+            if cycle_count > 0 {
+                parts.push(format!("{} cycles", cycle_count));
+            }
+            return Err(anyhow::anyhow!(
+                "architectural violations detected: {}",
+                parts.join(", ")
+            ));
+        }
     }
 
     Ok(())
