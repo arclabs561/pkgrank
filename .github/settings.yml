@@ -17,6 +17,6 @@ repository:
     - graph-analysis
     - pagerank
     - code-analysis
-    - mcp
-    - rust
-    - polyglot
+    - architecture
+    - static-analysis
+    - cli

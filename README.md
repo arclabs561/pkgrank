@@ -4,7 +4,7 @@ Ranks nodes in a dependency graph by structural importance (PageRank, betweennes
 
 Two axes of analysis:
 - **File-level** (`files`): which source files are structural hotspots, forming cycles, or high churn risk? Polyglot (Rust, Python, JS/TS/Svelte/Vue, Go), works on any git-cloneable URL.
-- **Package-level** (`analyze`): which packages in a dependency tree are most central, most depended-on, most risky to change? Supports Cargo, npm, Python, and Go.
+- **Package-level** (`analyze`): which packages in a dependency tree are most central, most depended-on, most risky to change? Supports Rust, Python, JS/TS, and Go.
 
 ## Install
 
@@ -36,7 +36,7 @@ pkgrank files https://github.com/fastapi/fastapi
 pkgrank files gl:inkscape/inkscape          # GitLab
 pkgrank files cb:forgejo/forgejo            # Codeberg
 pkgrank files sh:~sircmpwn/aerc             # SourceHut
-pkgrank files bb:atlassian/stash            # Bitbucket
+pkgrank files bb:pypy/pypy                  # Bitbucket
 pkgrank files tg:tangled.org/core           # Tangled
 
 # File-level with git churn risk overlay
@@ -240,11 +240,9 @@ These subcommands use `cargo metadata` and are specific to Rust/Cargo workspaces
 
 ```bash
 cargo install cargo-modules
-pkgrank modules --manifest-path ../Cargo.toml -p walk --lib -n 25
-pkgrank modules-sweep --manifest-path ../Cargo.toml -p walk -p innr --lib
+pkgrank modules -p my_crate --lib -n 25
+pkgrank modules-sweep -p crate_a -p crate_b --lib
 ```
-
-CLI defaults include types + traits (functions hidden). MCP defaults are more conservative; use `preset` like `file-api` or `file-full` for the CLI-like view.
 
 ## Output format
 
@@ -269,7 +267,7 @@ For commands that support `--format json`, the JSON is wrapped for forwards-comp
 
 Toolset selection:
 - Default: **slim** (small tool surface)
-- `PKGRANK_MCP_TOOLSET=full`: advanced tools (module/type graph, polyglot, files)
+- `PKGRANK_MCP_TOOLSET=full`: advanced tools (module graph, file analysis, all ecosystems)
 - `PKGRANK_MCP_TOOLSET=debug`: internal artifact-inspection tools
 
 ## Tests

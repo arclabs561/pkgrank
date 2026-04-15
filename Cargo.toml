@@ -9,6 +9,8 @@ repository = "https://github.com/arclabs561/pkgrank"
 homepage = "https://github.com/arclabs561/pkgrank"
 
 description = "Centrality analysis for dependency graphs and file-level import graphs"
+keywords = ["dependency", "graph", "pagerank", "architecture", "analysis"]
+categories = ["command-line-utilities", "development-tools"]
 
 [workspace]
 resolver = "2"
