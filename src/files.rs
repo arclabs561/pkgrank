@@ -2371,8 +2371,14 @@ fn expand_uri(s: &str) -> String {
 /// Compute a cache key from file paths + mtimes + analysis args.
 fn files_cache_key(files: &[PathBuf], args: &FilesArgs) -> u64 {
     let mut material = format!(
-        "v2\necosystem={:?}\ndir={}\ngit={}\ngit_days={}\ntests={}\n",
-        args.ecosystem, args.directory, args.git, args.git_days, args.include_tests
+        "v={}\necosystem={:?}\ndir={}\ngit={}\ngit_days={}\ntests={}\nall={}\n",
+        env!("CARGO_PKG_VERSION"),
+        args.ecosystem,
+        args.directory,
+        args.git,
+        args.git_days,
+        args.include_tests,
+        args.include_all,
     );
     for f in files {
         let mtime = f

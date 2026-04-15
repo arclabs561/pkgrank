@@ -1,0 +1,27 @@
+# Real-world repos for regression testing
+# Format: repo_or_url ecosystem expected_min_nodes
+# Run: for each line, `pkgrank files <repo> --ecosystem <eco> -n 1 --store=false`
+# should produce valid JSON with >= expected_min_nodes
+
+# Python
+psf/requests             python  15
+pallets/flask            python  20
+django/django            python  800
+
+# JavaScript / TypeScript
+expressjs/express        js      5
+sveltejs/svelte          js      500
+bluesky-social/atproto   js      2000
+
+# Rust
+BurntSushi/ripgrep       rust    80
+astral-sh/ruff           rust    400
+
+# Go
+gin-gonic/gin            go      50
+
+# Polyglot / monorepo (needs --ecosystem)
+vercel/next.js           js      15000
+
+# Non-GitHub (full URL)
+# https://gitlab.com/gitlab-org/gitlab-runner  go  (requires large clone)
