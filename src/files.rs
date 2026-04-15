@@ -368,6 +368,10 @@ fn discover_files_git(root: &Path, extensions: &[&str]) -> Option<Vec<PathBuf>> 
                 "docs/",
                 "doc/",
                 "fuzz/",
+                "locale/",
+                "locales/",
+                "translations/",
+                "i18n/",
             ];
             !skip_dirs.iter().any(|d| l.contains(d))
         })
