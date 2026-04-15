@@ -383,10 +383,184 @@ fn extract_external_deps(
             .iter()
             .copied()
             .collect(),
-        Ecosystem::Python => {
-            // Skip stdlib -- too many to list, focus on third-party.
-            HashSet::new()
-        }
+        Ecosystem::Python => [
+            "abc",
+            "argparse",
+            "ast",
+            "asyncio",
+            "base64",
+            "binascii",
+            "bisect",
+            "builtins",
+            "calendar",
+            "cgi",
+            "cmd",
+            "codecs",
+            "collections",
+            "colorsys",
+            "concurrent",
+            "configparser",
+            "contextlib",
+            "contextvars",
+            "copy",
+            "copyreg",
+            "csv",
+            "ctypes",
+            "dataclasses",
+            "datetime",
+            "decimal",
+            "difflib",
+            "dis",
+            "distutils",
+            "doctest",
+            "email",
+            "encodings",
+            "enum",
+            "errno",
+            "faulthandler",
+            "filecmp",
+            "fileinput",
+            "fnmatch",
+            "fractions",
+            "ftplib",
+            "functools",
+            "gc",
+            "getopt",
+            "getpass",
+            "gettext",
+            "glob",
+            "grp",
+            "gzip",
+            "hashlib",
+            "heapq",
+            "hmac",
+            "html",
+            "http",
+            "idlelib",
+            "imaplib",
+            "importlib",
+            "inspect",
+            "io",
+            "ipaddress",
+            "itertools",
+            "json",
+            "keyword",
+            "lib2to3",
+            "linecache",
+            "locale",
+            "logging",
+            "lzma",
+            "mailbox",
+            "math",
+            "mimetypes",
+            "mmap",
+            "multiprocessing",
+            "netrc",
+            "numbers",
+            "operator",
+            "optparse",
+            "os",
+            "pathlib",
+            "pdb",
+            "pickle",
+            "pickletools",
+            "pipes",
+            "pkgutil",
+            "platform",
+            "plistlib",
+            "poplib",
+            "posixpath",
+            "pprint",
+            "profile",
+            "pstats",
+            "pty",
+            "pwd",
+            "pydoc",
+            "queue",
+            "quopri",
+            "random",
+            "re",
+            "readline",
+            "reprlib",
+            "resource",
+            "rlcompleter",
+            "runpy",
+            "sched",
+            "secrets",
+            "select",
+            "selectors",
+            "shelve",
+            "shlex",
+            "shutil",
+            "signal",
+            "site",
+            "smtplib",
+            "sndhdr",
+            "socket",
+            "socketserver",
+            "sqlite3",
+            "ssl",
+            "stat",
+            "statistics",
+            "string",
+            "stringprep",
+            "struct",
+            "subprocess",
+            "sunau",
+            "symtable",
+            "sys",
+            "sysconfig",
+            "syslog",
+            "tabnanny",
+            "tarfile",
+            "telnetlib",
+            "tempfile",
+            "termios",
+            "test",
+            "textwrap",
+            "threading",
+            "time",
+            "timeit",
+            "tkinter",
+            "token",
+            "tokenize",
+            "tomllib",
+            "trace",
+            "traceback",
+            "tracemalloc",
+            "tty",
+            "turtle",
+            "turtledemo",
+            "types",
+            "typing",
+            "unicodedata",
+            "unittest",
+            "urllib",
+            "uuid",
+            "venv",
+            "warnings",
+            "wave",
+            "weakref",
+            "webbrowser",
+            "winreg",
+            "wsgiref",
+            "xdrlib",
+            "xml",
+            "xmlrpc",
+            "zipapp",
+            "zipfile",
+            "zipimport",
+            "zlib",
+            "_thread",
+            "__future__",
+            // Common false positives from Python syntax
+            "name",
+            "main",
+            "file",
+        ]
+        .iter()
+        .copied()
+        .collect(),
         Ecosystem::Js | Ecosystem::Go => HashSet::new(),
     };
 
@@ -429,6 +603,7 @@ fn extract_external_deps(
                         if !top.is_empty()
                             && !top.starts_with('.')
                             && !internal_prefixes.contains(top)
+                            && !std_prefixes.contains(top)
                         {
                             deps.insert(top.to_string());
                         }
@@ -437,7 +612,7 @@ fn extract_external_deps(
                             let mod_part = mod_part.trim();
                             if !mod_part.starts_with('.') {
                                 let top = mod_part.split('.').next().unwrap_or(mod_part);
-                                if !internal_prefixes.contains(top) {
+                                if !internal_prefixes.contains(top) && !std_prefixes.contains(top) {
                                     deps.insert(top.to_string());
                                 }
                             }
@@ -2166,6 +2341,7 @@ fn clone_repo_to_temp(url: &str) -> Result<PathBuf> {
     let out = ProcessCommand::new("git")
         .args(["clone", "--depth", "1", url])
         .arg(&tmp)
+        .env_remove("GITHUB_TOKEN") // Avoid PAT auth failures on public repos
         .output()
         .map_err(|e| anyhow::anyhow!("git clone failed: {}", e))?;
     if !out.status.success() {
@@ -2184,13 +2360,9 @@ fn expand_uri(s: &str) -> String {
     if is_url(s) || PathBuf::from(s).exists() {
         return s.to_string();
     }
-    // owner/repo pattern (exactly one slash, no dots or spaces).
+    // owner/repo pattern (exactly one slash, no spaces, doesn't look like a file path).
     let parts: Vec<&str> = s.split('/').collect();
-    if parts.len() == 2
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && !p.contains('.') && !p.contains(' '))
-    {
+    if parts.len() == 2 && parts.iter().all(|p| !p.is_empty() && !p.contains(' ')) {
         return format!("https://github.com/{}/{}", parts[0], parts[1]);
     }
     s.to_string()
