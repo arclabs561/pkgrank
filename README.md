@@ -32,6 +32,11 @@ pkgrank files .
 pkgrank files tokio-rs/tokio
 pkgrank files https://github.com/fastapi/fastapi
 
+# Works with any git forge (GitLab, Codeberg, SourceHut, Bitbucket, Tangled)
+pkgrank files gl:inkscape/inkscape
+pkgrank files cb:forgejo/forgejo
+pkgrank files sh:~sircmpwn/aerc
+
 # File-level with git churn risk overlay
 pkgrank files . --git
 
