@@ -1753,6 +1753,11 @@ fn resolve_alias_to_path(spec: &str, aliases: &[(String, PathBuf)]) -> Option<Pa
         if let Some(rest) = spec.strip_prefix(prefix.as_str()) {
             return Some(target_dir.join(rest));
         }
+        // Bare package import: `@scope/pkg` matches alias `@scope/pkg/` → index file.
+        let bare = prefix.trim_end_matches('/');
+        if spec == bare {
+            return Some(target_dir.join("index"));
+        }
     }
     None
 }
@@ -1895,6 +1900,7 @@ fn parse_go_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
 
     let mut edges = Vec::new();
 
+    // Cross-package edges from import statements.
     for file in files {
         let content = match std::fs::read_to_string(file) {
             Ok(c) => c,
@@ -1916,6 +1922,23 @@ fn parse_go_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
                             to: target.clone(),
                         });
                     }
+                }
+            }
+        }
+    }
+
+    // Intra-package edges: Go files in the same directory share a namespace.
+    // Connect non-canonical files to the canonical file (star topology per package).
+    // This represents that files in the same package form a compilation unit.
+    for (pkg, canonical) in &pkg_canonical {
+        if let Some(pkg_files) = pkg_to_files.get(pkg) {
+            for f in pkg_files {
+                if f != canonical {
+                    // Non-canonical file "imports" the canonical (they share the namespace).
+                    edges.push(FileEdge {
+                        from: f.clone(),
+                        to: canonical.clone(),
+                    });
                 }
             }
         }

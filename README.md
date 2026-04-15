@@ -159,13 +159,16 @@ Output is sorted by BFS depth (closest dependents first), then by PageRank withi
 
 ### Upgrade priority (Cargo only)
 
-Combine `cargo outdated` with centrality ranking to prioritize which upgrades matter most:
+Renovate and Dependabot open dozens of upgrade PRs but don't rank them. pkgrank scores each outdated dep by structural importance: `10*ln(dependents+1) + 1000*pagerank + urgency_bonus`. The most central, most depended-on packages surface first.
 
 ```bash
 pkgrank upgrade-priority -n 15
+
+# JSON for CI integration
+pkgrank upgrade-priority --format json | jq '.rows[:5]'
 ```
 
-Requires [`cargo-outdated`](https://crates.io/crates/cargo-outdated). Scores each outdated dep by `10*ln(dependents+1) + 1000*pagerank + urgency_bonus`.
+Requires [`cargo-outdated`](https://crates.io/crates/cargo-outdated).
 
 ### TLC score
 
