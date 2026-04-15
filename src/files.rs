@@ -349,7 +349,27 @@ fn discover_files_git(root: &Path, extensions: &[&str]) -> Option<Vec<PathBuf>> 
                 .unwrap_or(false)
         })
         .filter(|l| {
-            // Skip generated files even if tracked.
+            // Skip files in directories that should be excluded.
+            let skip_dirs = [
+                "testdata/",
+                "vendor/",
+                "node_modules/",
+                "dist/",
+                "build/",
+                "__pycache__/",
+                ".git/",
+                "target/",
+                "fixtures/",
+                "migrations/",
+                "generated/",
+                "gen/",
+                "third_party/",
+                "third-party/",
+            ];
+            !skip_dirs.iter().any(|d| l.contains(d))
+        })
+        .filter(|l| {
+            // Skip generated files and type-only declaration files even if tracked.
             let fname = l.rsplit('/').next().unwrap_or(l);
             !fname.ends_with(".pb.go")
                 && !fname.ends_with("_generated.go")
@@ -359,6 +379,10 @@ fn discover_files_git(root: &Path, extensions: &[&str]) -> Option<Vec<PathBuf>> 
                 && !fname.ends_with("_pb2.py")
                 && !fname.ends_with("_pb2_grpc.py")
                 && !fname.starts_with("generated_")
+                // TypeScript declaration files: ambient types, not module imports.
+                && !fname.ends_with(".d.ts")
+                && !fname.ends_with(".d.mts")
+                && !fname.ends_with(".d.cts")
         })
         .map(|l| root.join(l))
         .collect();
@@ -435,7 +459,11 @@ fn walk_dir(dir: &Path, extensions: &[&str], out: &mut Vec<PathBuf>) {
                     || fname.ends_with(".generated.js")
                     || fname.ends_with("_pb2.py")                 // protobuf Python
                     || fname.ends_with("_pb2_grpc.py")
-                    || fname.starts_with("generated_");
+                    || fname.starts_with("generated_")
+                    // TypeScript declaration files: ambient types, not module imports.
+                    || fname.ends_with(".d.ts")
+                    || fname.ends_with(".d.mts")
+                    || fname.ends_with(".d.cts");
                 if !is_generated {
                     out.push(path);
                 }
