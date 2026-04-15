@@ -166,6 +166,29 @@ The `triage` and `view` commands produce a **TLC (Top-Level Cost) score** for ea
 
 Higher TLC = more structurally important and/or more exposed. It is a triage signal, not a quality metric.
 
+## Architectural rules (`.pkgrank.toml`)
+
+Define layers and forbidden dependencies in a `.pkgrank.toml` at the project root:
+
+```toml
+[layers]
+domain = ["src/domain/**", "src/models/**"]
+infra = ["src/infra/**", "src/db/**"]
+api = ["src/api/**", "src/routes/**"]
+
+[[deny]]
+from = "domain"
+to = "infra"
+
+[[deny]]
+from = "domain"
+to = "api"
+```
+
+Layers map glob patterns to names. Deny rules forbid imports from one layer to another. Violations are reported during `pkgrank files` and cause `--fail-on-violation` to exit 1.
+
+This works for any ecosystem -- the same `.pkgrank.toml` applies to Rust, Python, JS/TS, or Go projects.
+
 ## Cargo workspace tools
 
 These subcommands use `cargo metadata` and are specific to Rust/Cargo workspaces.

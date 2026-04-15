@@ -1,6 +1,6 @@
 use anyhow::Result;
 use petgraph::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
@@ -1803,6 +1803,105 @@ pub(crate) fn compute_affected(result: &FilesResult, changed: &[String]) -> Vec<
 }
 
 // ---------------------------------------------------------------------------
+// Architectural rules (.pkgrank.toml)
+// ---------------------------------------------------------------------------
+
+/// Project-level architectural rules loaded from `.pkgrank.toml`.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ArchRules {
+    /// Named layers mapping glob patterns to a layer name.
+    #[serde(default)]
+    pub layers: HashMap<String, Vec<String>>,
+    /// Denied dependencies between layers.
+    #[serde(default)]
+    pub deny: Vec<DenyRule>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct DenyRule {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct RuleViolation {
+    pub rule_from: String,
+    pub rule_to: String,
+    pub file_from: String,
+    pub file_to: String,
+}
+
+/// Load `.pkgrank.toml` from a directory. Returns None if not found.
+pub(crate) fn load_arch_rules(dir: &Path) -> Option<ArchRules> {
+    let path = dir.join(".pkgrank.toml");
+    let raw = std::fs::read_to_string(&path).ok()?;
+    toml::from_str(&raw).ok()
+}
+
+/// Check edges against user-defined architectural rules.
+pub(crate) fn check_arch_rules(
+    rules: &ArchRules,
+    edges: &[(String, String)],
+) -> Vec<RuleViolation> {
+    // Build layer membership: file -> layer name.
+    let mut file_layer: HashMap<&str, &str> = HashMap::new();
+
+    // Pre-compile glob patterns per layer.
+    let layer_patterns: Vec<(&str, Vec<glob::Pattern>)> = rules
+        .layers
+        .iter()
+        .map(|(name, patterns)| {
+            let compiled: Vec<glob::Pattern> = patterns
+                .iter()
+                .filter_map(|p| glob::Pattern::new(p).ok())
+                .collect();
+            (name.as_str(), compiled)
+        })
+        .collect();
+
+    // Collect all file paths from edges.
+    let mut all_files: HashSet<&str> = HashSet::new();
+    for (from, to) in edges {
+        all_files.insert(from.as_str());
+        all_files.insert(to.as_str());
+    }
+
+    // Assign files to layers.
+    for &file in &all_files {
+        for (layer_name, patterns) in &layer_patterns {
+            if patterns.iter().any(|p| p.matches(file)) {
+                file_layer.insert(file, layer_name);
+                break; // First matching layer wins.
+            }
+        }
+    }
+
+    // Check each edge against deny rules.
+    let mut violations = Vec::new();
+    for (from, to) in edges {
+        let from_layer = match file_layer.get(from.as_str()) {
+            Some(l) => *l,
+            None => continue,
+        };
+        let to_layer = match file_layer.get(to.as_str()) {
+            Some(l) => *l,
+            None => continue,
+        };
+        for rule in &rules.deny {
+            if rule.from == from_layer && rule.to == to_layer {
+                violations.push(RuleViolation {
+                    rule_from: rule.from.clone(),
+                    rule_to: rule.to.clone(),
+                    file_from: from.clone(),
+                    file_to: to.clone(),
+                });
+            }
+        }
+    }
+    violations
+}
+
+// ---------------------------------------------------------------------------
 // Core analysis
 // ---------------------------------------------------------------------------
 
@@ -2863,17 +2962,60 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
         }
     }
 
+    // Check user-defined architectural rules (.pkgrank.toml).
+    let project_dir = if is_url(&args.path) {
+        PathBuf::from(".")
+    } else {
+        let p = PathBuf::from(&args.path);
+        if p.is_file() {
+            p.parent().unwrap_or(Path::new(".")).to_path_buf()
+        } else {
+            p
+        }
+    };
+    let arch_rules = load_arch_rules(&project_dir);
+    let rule_violations = if let Some(ref rules) = arch_rules {
+        let v = check_arch_rules(rules, &result.direct_edges);
+        if !v.is_empty() {
+            let fmt = effective_format(args.format);
+            match fmt {
+                OutputFormat::Json => {
+                    // Will be included in fail-on-violation error below.
+                }
+                OutputFormat::Text => {
+                    println!("\nrule violations ({}, from .pkgrank.toml):", v.len());
+                    for rv in v.iter().take(10) {
+                        println!(
+                            "  {} -> {}  (rule: {} must not import {})",
+                            rv.file_from, rv.file_to, rv.rule_from, rv.rule_to
+                        );
+                    }
+                    if v.len() > 10 {
+                        println!("  ... (+{} more)", v.len() - 10);
+                    }
+                }
+            }
+        }
+        v
+    } else {
+        Vec::new()
+    };
+
     // CI mode: fail if violations detected.
     if args.fail_on_violation {
-        let violations = compute_layer_violations(&result);
+        let layer_violations = compute_layer_violations(&result);
         let cycle_count = result.cycles.len();
-        if !violations.is_empty() || cycle_count > 0 {
+        let rule_count = rule_violations.len();
+        if !layer_violations.is_empty() || cycle_count > 0 || rule_count > 0 {
             let mut parts = Vec::new();
-            if !violations.is_empty() {
-                parts.push(format!("{} layer violations", violations.len()));
+            if !layer_violations.is_empty() {
+                parts.push(format!("{} layer violations", layer_violations.len()));
             }
             if cycle_count > 0 {
                 parts.push(format!("{} cycles", cycle_count));
+            }
+            if rule_count > 0 {
+                parts.push(format!("{} rule violations", rule_count));
             }
             return Err(anyhow::anyhow!(
                 "architectural violations detected: {}",
