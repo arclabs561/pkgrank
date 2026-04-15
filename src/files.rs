@@ -2822,8 +2822,40 @@ fn expand_uri(s: &str) -> String {
     if is_url(s) || PathBuf::from(s).exists() {
         return s.to_string();
     }
-    // owner/repo pattern (exactly one slash, no spaces, doesn't look like a file path).
+
     let parts: Vec<&str> = s.split('/').collect();
+
+    // forge:owner/repo shorthand for non-GitHub forges.
+    // e.g., "gl:inkscape/inkscape", "cb:forgejo/forgejo", "sh:~sircmpwn/aerc"
+    if parts.len() >= 2 {
+        if let Some((prefix, rest)) = s.split_once(':') {
+            let url = match prefix {
+                "gl" | "gitlab" => Some(format!("https://gitlab.com/{}", rest)),
+                "cb" | "codeberg" => Some(format!("https://codeberg.org/{}", rest)),
+                "sh" | "srht" | "sourcehut" => Some(format!("https://git.sr.ht/{}", rest)),
+                "bb" | "bitbucket" => Some(format!("https://bitbucket.org/{}", rest)),
+                "sf" | "sourceforge" => {
+                    // SourceForge: sf:project/repo -> https://git.code.sf.net/p/project/repo
+                    let sf_parts: Vec<&str> = rest.splitn(2, '/').collect();
+                    if sf_parts.len() == 2 {
+                        Some(format!(
+                            "https://git.code.sf.net/p/{}/{}",
+                            sf_parts[0], sf_parts[1]
+                        ))
+                    } else {
+                        None
+                    }
+                }
+                "tg" | "tangled" => Some(format!("https://tangled.org/{}.git", rest)),
+                _ => None,
+            };
+            if let Some(url) = url {
+                return url;
+            }
+        }
+    }
+
+    // owner/repo pattern -> GitHub (default forge).
     if parts.len() == 2 && parts.iter().all(|p| !p.is_empty() && !p.contains(' ')) {
         return format!("https://github.com/{}/{}", parts[0], parts[1]);
     }
