@@ -1995,10 +1995,10 @@ fn compute_tlc_crates(root: &Path, out_dir: &Path) -> Result<Vec<TlcCrateRow>> {
     // Export first-party crate dependency adjacency (JSON adjacency list).
     //
     // This is intentionally a *data boundary*, not a Rust dependency boundary:
-    // pkgrank should not depend on higher-layer crates (e.g. `webs`/`webs-core` in L5).
+    // pkgrank should not depend on higher-layer crates.
     //
-    // The export happens to be compatible with `webs_core::KnowledgeGraph::from_json_adjacency_file`,
-    // so you can run L5 analysis tools *externally* on the exact same graph.
+    // The export uses a standard JSON adjacency format so downstream analysis tools
+    // can consume the graph without a Rust dependency.
     let mut adj: HashMap<String, HashSet<String>> = HashMap::new();
     for (u, v) in &fp_edges {
         let Some(u_node) = fp_nodes.get(*u).copied() else {

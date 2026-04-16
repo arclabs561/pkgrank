@@ -22,7 +22,7 @@ fn triage_cli_reads_artifacts_without_refresh() {
         &out_dir.join("tlc.crates.json"),
         r#"[{
   "repo":"pkgrank",
-  "axis":"tekne",
+  "axis":"default",
   "name":"pkgrank",
   "manifest_path":"pkgrank/Cargo.toml",
   "origin":"workspace_member",
@@ -41,7 +41,7 @@ fn triage_cli_reads_artifacts_without_refresh() {
         &out_dir.join("tlc.repos.json"),
         r#"[{
   "repo":"pkgrank",
-  "axis":"tekne",
+  "axis":"default",
   "deps_pagerank":0.2,
   "consumers_pagerank":0.3,
   "transitive_dependents":1,
