@@ -2480,7 +2480,7 @@ fn compute_repo_graph_from_live_metadata(
             }
         }
     }
-    violations.sort_by(|a, b| b.weight.cmp(&a.weight));
+    violations.sort_by_key(|b| std::cmp::Reverse(b.weight));
 
     // TLC for repos: central + boundary-heavy + violations.
     let mut violation_weight_by_repo: HashMap<String, usize> = HashMap::new();
@@ -2775,7 +2775,7 @@ fn write_recent_files_artifacts(
         }
     }
 
-    out.sort_by(|a, b| b.modified_unix.cmp(&a.modified_unix));
+    out.sort_by_key(|b| std::cmp::Reverse(b.modified_unix));
     if out.len() > recent_max {
         out.truncate(recent_max);
     }
@@ -2790,9 +2790,9 @@ fn write_recent_files_artifacts(
         }
     }
     let mut by_repo = by_repo.into_iter().collect::<Vec<_>>();
-    by_repo.sort_by(|a, b| b.1.cmp(&a.1));
+    by_repo.sort_by_key(|b| std::cmp::Reverse(b.1));
     let mut by_crate = by_crate.into_iter().collect::<Vec<_>>();
-    by_crate.sort_by(|a, b| b.1.cmp(&a.1));
+    by_crate.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     let generated_at_unix = now
         .duration_since(UNIX_EPOCH)
@@ -4013,7 +4013,7 @@ fn run_view(args: &ViewArgs) -> Result<()> {
                 );
 
                 let mut by_dependents = tlc.clone();
-                by_dependents.sort_by(|a, b| b.transitive_dependents.cmp(&a.transitive_dependents));
+                by_dependents.sort_by_key(|b| std::cmp::Reverse(b.transitive_dependents));
                 html.push_str("<div><h2>Blast radius (dependents)</h2><table><thead><tr><th>rank</th><th>crate</th><th>dependents</th></tr></thead><tbody>");
                 for (i, r) in by_dependents.iter().take(15).enumerate() {
                     html.push_str(&format!(
@@ -4026,7 +4026,7 @@ fn run_view(args: &ViewArgs) -> Result<()> {
                 html.push_str("</tbody></table></div>");
 
                 let mut by_boundary = tlc.clone();
-                by_boundary.sort_by(|a, b| b.third_party_deps.cmp(&a.third_party_deps));
+                by_boundary.sort_by_key(|b| std::cmp::Reverse(b.third_party_deps));
                 html.push_str("<div><h2>Boundary load (3p deps)</h2><table><thead><tr><th>rank</th><th>crate</th><th>3p deps</th></tr></thead><tbody>");
                 for (i, r) in by_boundary.iter().take(15).enumerate() {
                     html.push_str(&format!(

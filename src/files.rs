@@ -1189,10 +1189,8 @@ fn parse_use_statement(
     let line = line.trim();
     let use_part = if let Some(rest) = strip_visibility(line).strip_prefix("use ") {
         rest
-    } else if let Some(rest) = line.strip_prefix("use ") {
-        rest
     } else {
-        return None;
+        line.strip_prefix("use ")?
     };
 
     let use_part = use_part.trim_end_matches(';').trim();
@@ -2625,7 +2623,7 @@ fn git_file_stats(root: &Path, days: u64) -> GitStats {
         }
     }
     for partners in co_changers.values_mut() {
-        partners.sort_by(|a, b| b.1.cmp(&a.1));
+        partners.sort_by_key(|b| std::cmp::Reverse(b.1));
         partners.truncate(5);
     }
 
@@ -3489,7 +3487,7 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
             if result.nodes > 3 {
                 // Hub files (top 3 by in-degree).
                 let mut by_in: Vec<&FileRow> = result.rows.iter().collect();
-                by_in.sort_by(|a, b| b.in_degree.cmp(&a.in_degree));
+                by_in.sort_by_key(|b| std::cmp::Reverse(b.in_degree));
                 println!("\nhubs (most depended-on):");
                 for r in by_in.iter().take(3) {
                     println!(
@@ -3545,7 +3543,7 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                     .iter()
                     .filter(|r| r.in_degree == 0 && r.out_degree > 0)
                     .collect();
-                consumers.sort_by(|a, b| b.out_degree.cmp(&a.out_degree));
+                consumers.sort_by_key(|b| std::cmp::Reverse(b.out_degree));
                 if !consumers.is_empty() {
                     println!("\nentry points (no dependents, import others):");
                     for r in consumers.iter().take(3) {
