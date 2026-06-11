@@ -1385,6 +1385,246 @@ pub(crate) fn metadata_for(manifest_path: &PathBuf, args: &AnalyzeArgs) -> Resul
     }
 }
 
+/// `cargo metadata` for a path that is either a single cargo workspace
+/// (Cargo.toml present) or a super-workspace root of standalone repos
+/// (no Cargo.toml; one repo per subdirectory).
+pub(crate) fn metadata_for_path(path: &Path, args: &AnalyzeArgs) -> Result<Metadata> {
+    let manifest = manifest_path(path)?;
+    if !manifest.exists() && path.is_dir() {
+        return merged_metadata_for_repo_roots(path, args);
+    }
+    metadata_for(&manifest, args)
+        .with_context(|| format!("cargo metadata failed for {}", manifest.display()))
+}
+
+/// Repo roots under a super-workspace root: immediate subdirectories that
+/// contain a `Cargo.toml`, plus one level deeper under umbrella directories
+/// (subdirectories without their own `Cargo.toml`). Hidden and `_`-prefixed
+/// directories are skipped at both levels, matching the sweep-local
+/// convention (`_archive/`, `_forks/`, etc. are not first-party).
+pub(crate) fn discover_repo_roots(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    for entry in fs::read_dir(root).with_context(|| format!("failed to read {}", root.display()))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') || name.starts_with('_') {
+            continue;
+        }
+        let dir = entry.path();
+        if dir.join("Cargo.toml").exists() {
+            out.push(dir);
+            continue;
+        }
+        // Umbrella dir: repos one level down (e.g. `infra/accounting`).
+        let Ok(children) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for child in children.flatten() {
+            let cname = child.file_name().to_string_lossy().to_string();
+            if cname.starts_with('.') || cname.starts_with('_') {
+                continue;
+            }
+            let cdir = child.path();
+            if cdir.is_dir() && cdir.join("Cargo.toml").exists() {
+                out.push(cdir);
+            }
+        }
+    }
+    // Deterministic order: pass-1 of the merge below picks the first repo that
+    // defines a crate name as canonical, so ordering must be stable.
+    out.sort();
+    Ok(out)
+}
+
+/// Raw `cargo metadata` JSON for one manifest, honoring the feature flags.
+///
+/// We shell out (rather than `MetadataCommand`) because the merge below works
+/// on the JSON representation, and the raw output is guaranteed to round-trip
+/// through `Metadata`'s Deserialize.
+fn raw_metadata_json(manifest_path: &Path, args: &AnalyzeArgs) -> Result<serde_json::Value> {
+    let mut cmd = ProcessCommand::new("cargo");
+    cmd.args(["metadata", "--format-version", "1"]);
+    cmd.args(["--manifest-path", &manifest_path.to_string_lossy()]);
+    if args.all_features {
+        cmd.arg("--all-features");
+    } else {
+        if args.no_default_features {
+            cmd.arg("--no-default-features");
+        }
+        if let Some(feats) = args.features.as_deref() {
+            if !feats.trim().is_empty() {
+                cmd.args(["--features", feats]);
+            }
+        }
+    }
+    let out = cmd
+        .output()
+        .with_context(|| format!("failed to spawn: {:?}", cmd))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(anyhow!(
+            "cargo metadata failed (exit={:?}): {}",
+            out.status.code(),
+            stderr.trim()
+        ));
+    }
+    serde_json::from_slice(&out.stdout)
+        .with_context(|| "failed to parse `cargo metadata` JSON output")
+}
+
+/// Merge per-repo `cargo metadata` runs into one virtual-workspace `Metadata`.
+///
+/// The super-workspace has no root Cargo.toml (standalone repos); cross-repo
+/// dependencies are version deps resolved from the registry. To keep the
+/// first-party graph connected, any package whose name matches a workspace
+/// member from another repo is unified onto that member (the registry or
+/// vendored copy becomes an alias of the local crate). This mirrors what the
+/// old root workspace produced via `[patch.crates-io]` entries.
+fn merged_metadata_for_repo_roots(root: &Path, args: &AnalyzeArgs) -> Result<Metadata> {
+    let repos = discover_repo_roots(root)?;
+    if repos.is_empty() {
+        return Err(anyhow!(
+            "no Cargo.toml at {root} and no repo roots (subdirectories with a Cargo.toml) under it",
+            root = root.display()
+        ));
+    }
+
+    let mut metas: Vec<serde_json::Value> = Vec::new();
+    for repo in &repos {
+        match raw_metadata_json(&repo.join("Cargo.toml"), args) {
+            Ok(v) => metas.push(v),
+            // Skip-and-warn: one broken repo should not sink the whole view.
+            Err(e) => eprintln!("pkgrank: skipping {}: {:#}", repo.display(), e),
+        }
+    }
+    if metas.is_empty() {
+        return Err(anyhow!(
+            "cargo metadata failed for every repo root under {}",
+            root.display()
+        ));
+    }
+
+    // Pass 1: canonical package id per first-party crate name (workspace
+    // members across all repos). First repo wins on duplicate crate names.
+    let mut canonical_by_name: HashMap<String, String> = HashMap::new();
+    for m in &metas {
+        let members: HashSet<&str> = m["workspace_members"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+            .unwrap_or_default();
+        for pkg in m["packages"].as_array().into_iter().flatten() {
+            let (Some(id), Some(name)) = (pkg["id"].as_str(), pkg["name"].as_str()) else {
+                continue;
+            };
+            if members.contains(id) {
+                canonical_by_name
+                    .entry(name.to_string())
+                    .or_insert_with(|| id.to_string());
+            }
+        }
+    }
+
+    // Pass 2: every other id carrying a first-party name (a registry/git/path
+    // copy of a local crate, as seen from a consumer repo) is an alias.
+    let mut alias: HashMap<String, String> = HashMap::new();
+    for m in &metas {
+        for pkg in m["packages"].as_array().into_iter().flatten() {
+            let (Some(id), Some(name)) = (pkg["id"].as_str(), pkg["name"].as_str()) else {
+                continue;
+            };
+            if let Some(canon) = canonical_by_name.get(name) {
+                if id != canon {
+                    alias.insert(id.to_string(), canon.clone());
+                }
+            }
+        }
+    }
+
+    // Pass 3: merged packages / members / resolve nodes. Aliases are dropped
+    // (their canonical node comes from the owning repo, including its outgoing
+    // edges, so we don't pick up a stale published version's dependency list);
+    // edges *into* an alias are rewritten to the canonical id.
+    let mut seen_pkgs: HashSet<String> = HashSet::new();
+    let mut packages: Vec<serde_json::Value> = Vec::new();
+    let mut seen_members: HashSet<String> = HashSet::new();
+    let mut members: Vec<serde_json::Value> = Vec::new();
+    let mut seen_nodes: HashSet<String> = HashSet::new();
+    let mut nodes: Vec<serde_json::Value> = Vec::new();
+
+    for m in &metas {
+        for pkg in m["packages"].as_array().into_iter().flatten() {
+            let Some(id) = pkg["id"].as_str() else {
+                continue;
+            };
+            if alias.contains_key(id) || !seen_pkgs.insert(id.to_string()) {
+                continue;
+            }
+            packages.push(pkg.clone());
+        }
+        for member in m["workspace_members"].as_array().into_iter().flatten() {
+            let Some(id) = member.as_str() else {
+                continue;
+            };
+            if alias.contains_key(id) || !seen_members.insert(id.to_string()) {
+                continue;
+            }
+            members.push(member.clone());
+        }
+        for node in m["resolve"]["nodes"].as_array().into_iter().flatten() {
+            let Some(id) = node["id"].as_str() else {
+                continue;
+            };
+            if alias.contains_key(id) || !seen_nodes.insert(id.to_string()) {
+                continue;
+            }
+            let id = id.to_string();
+            let mut node = node.clone();
+            if let Some(deps) = node["deps"].as_array_mut() {
+                deps.retain_mut(|d| {
+                    let Some(pkg) = d["pkg"].as_str() else {
+                        return true;
+                    };
+                    let canon = alias.get(pkg).cloned().unwrap_or_else(|| pkg.to_string());
+                    if canon == id {
+                        // Self-edge after unification (e.g. a crate depending
+                        // on an older published version of itself).
+                        return false;
+                    }
+                    d["pkg"] = serde_json::Value::String(canon);
+                    true
+                });
+            }
+            // The deprecated flat `dependencies` list, kept consistent.
+            if let Some(dependencies) = node["dependencies"].as_array_mut() {
+                dependencies.retain_mut(|d| {
+                    let Some(pkg) = d.as_str() else {
+                        return true;
+                    };
+                    let canon = alias.get(pkg).cloned().unwrap_or_else(|| pkg.to_string());
+                    if canon == id {
+                        return false;
+                    }
+                    *d = serde_json::Value::String(canon);
+                    true
+                });
+            }
+            nodes.push(node);
+        }
+    }
+
+    // Use the first repo's metadata as the envelope (version, target dir, ...).
+    let mut merged = metas.swap_remove(0);
+    merged["packages"] = serde_json::Value::Array(packages);
+    merged["workspace_default_members"] = serde_json::Value::Array(members.clone());
+    merged["workspace_members"] = serde_json::Value::Array(members);
+    merged["resolve"] = serde_json::json!({ "nodes": nodes, "root": null });
+    merged["workspace_root"] = serde_json::Value::String(root.to_string_lossy().to_string());
+    serde_json::from_value(merged).with_context(|| "failed to assemble merged cargo metadata")
+}
+
 pub(crate) fn build_graph(
     metadata: &Metadata,
     args: &AnalyzeArgs,
@@ -1895,8 +2135,7 @@ fn compute_tlc_crates(root: &Path, out_dir: &Path) -> Result<Vec<TlcCrateRow>> {
         cache: false,
         cache_refresh: false,
     };
-    let manifest = manifest_path(&analyze.path)?;
-    let metadata = metadata_for(&manifest, &analyze)?;
+    let metadata = metadata_for_path(&analyze.path, &analyze)?;
     let (graph, node_map) = build_graph(&metadata, &analyze)?;
     let rows = compute_rows(&metadata, &graph, &node_map)?;
 
@@ -2263,8 +2502,7 @@ fn compute_repo_graph_from_live_metadata(
         cache: false,
         cache_refresh: false,
     };
-    let manifest_path = manifest_path(&analyze.path)?;
-    let metadata = metadata_for(&manifest_path, &analyze)?;
+    let metadata = metadata_for_path(&analyze.path, &analyze)?;
     let resolve = metadata
         .resolve
         .as_ref()
@@ -2916,8 +3154,10 @@ fn run_sweep_local(args: &SweepLocalArgs) -> Result<()> {
             }
         }
         SweepMode::RepoRoots => {
-            // Repo-local mode: use overview list if present, else fall back to immediate children with Cargo.toml.
-            let repos = if overview_path.exists() {
+            // Repo-local mode: use overview list if present, else discover repo
+            // roots (immediate children with Cargo.toml, plus umbrella dirs one
+            // level down -- the same discovery the merged view fallback uses).
+            let repos: Vec<(String, PathBuf)> = if overview_path.exists() {
                 let raw = fs::read_to_string(&overview_path)
                     .with_context(|| format!("failed to read {}", overview_path.display()))?;
                 let v: serde_json::Value = serde_json::from_str(&raw)?;
@@ -2926,29 +3166,29 @@ fn run_sweep_local(args: &SweepLocalArgs) -> Result<()> {
                     .and_then(|x| x.as_array())
                     .ok_or_else(|| anyhow!("overview missing member_repos array"))?;
                 arr.iter()
-                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                    .collect::<Vec<_>>()
+                    .filter_map(|x| x.as_str())
+                    .map(|s| (s.to_string(), root.join(s)))
+                    .collect()
             } else {
-                // Limited fallback: immediate directories under root with Cargo.toml.
-                let mut out = Vec::new();
-                for entry in fs::read_dir(&root)? {
-                    let entry = entry?;
-                    if !entry.file_type()?.is_dir() {
-                        continue;
-                    }
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if name.starts_with('.') || name.starts_with('_') {
-                        continue;
-                    }
-                    if entry.path().join("Cargo.toml").exists() {
-                        out.push(name);
-                    }
-                }
-                out
+                discover_repo_roots(&root)?
+                    .into_iter()
+                    .map(|dir| {
+                        let name = dir
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| dir.display().to_string());
+                        (name, dir)
+                    })
+                    .collect()
             };
+            if repos.is_empty() {
+                eprintln!(
+                    "sweep-local: no repo roots found under {} (no subdirectory has a Cargo.toml)",
+                    root.display()
+                );
+            }
 
-            for repo in repos {
-                let repo_dir = root.join(&repo);
+            for (repo, repo_dir) in repos {
                 let cargo_toml = repo_dir.join("Cargo.toml");
                 if !cargo_toml.exists() {
                     summary.missing.push(repo);
@@ -3018,6 +3258,16 @@ fn run_sweep_local(args: &SweepLocalArgs) -> Result<()> {
         serde_json::to_string_pretty(&summary)?,
     )?;
 
+    // One-line receipt on stderr: a sweep that writes nothing useful should
+    // say so instead of exiting silently.
+    eprintln!(
+        "sweep-local: {} ok, {} failed, {} missing -> {}",
+        summary.ok.len(),
+        summary.failed.len(),
+        summary.missing.len(),
+        out_dir.display()
+    );
+
     // Optional: “recently modified files” view (mtime-based, bounded scan).
     // This is an intentionally git-free signal: the dev folder is a super-workspace.
     if args.recent {
@@ -3027,9 +3277,7 @@ fn run_sweep_local(args: &SweepLocalArgs) -> Result<()> {
 }
 
 fn analyze_rows(args: &AnalyzeArgs) -> Result<Vec<Row>> {
-    let manifest_path = manifest_path(&args.path)?;
-    let metadata = metadata_for(&manifest_path, args)
-        .with_context(|| format!("cargo metadata failed for {}", manifest_path.display()))?;
+    let metadata = metadata_for_path(&args.path, args)?;
     let (graph, nodes) = build_graph(&metadata, args)?;
     compute_rows(&metadata, &graph, &nodes)
 }
