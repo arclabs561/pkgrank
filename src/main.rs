@@ -19,6 +19,7 @@ use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -1389,12 +1390,77 @@ pub(crate) fn metadata_for(manifest_path: &PathBuf, args: &AnalyzeArgs) -> Resul
 /// (Cargo.toml present) or a super-workspace root of standalone repos
 /// (no Cargo.toml; one repo per subdirectory).
 pub(crate) fn metadata_for_path(path: &Path, args: &AnalyzeArgs) -> Result<Metadata> {
+    Ok(metadata_for_path_with_receipt(path, args)?.0)
+}
+
+/// Like [`metadata_for_path`], but also returns the merge receipt when the
+/// merged repo-roots path was taken (`None` for a plain cargo workspace).
+pub(crate) fn metadata_for_path_with_receipt(
+    path: &Path,
+    args: &AnalyzeArgs,
+) -> Result<(Metadata, Option<MergeReceipt>)> {
     let manifest = manifest_path(path)?;
     if !manifest.exists() && path.is_dir() {
-        return merged_metadata_for_repo_roots(path, args);
+        let (metadata, receipt) = merged_metadata_for_repo_roots(path, args)?;
+        return Ok((metadata, Some(receipt)));
     }
-    metadata_for(&manifest, args)
-        .with_context(|| format!("cargo metadata failed for {}", manifest.display()))
+    let metadata = metadata_for(&manifest, args)
+        .with_context(|| format!("cargo metadata failed for {}", manifest.display()))?;
+    Ok((metadata, None))
+}
+
+/// Receipt for one merged super-workspace metadata build: anything the merge
+/// dropped or unified loosely enough that the caller should surface it
+/// (written as `merged.skipped.json` by the view path).
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct MergeReceipt {
+    /// Repo roots whose metadata made it into the merge.
+    pub merged_repos: usize,
+    /// Repos whose `cargo metadata` failed; absent from all artifacts.
+    pub skipped: Vec<MergeSkip>,
+    /// Name-only unifications where the aliased copy's version is
+    /// semver-incompatible with the canonical local member's.
+    pub version_mismatches: Vec<MergeVersionMismatch>,
+    /// Crate names defined as a workspace member by more than one repo;
+    /// the first repo (sorted order) wins, later ones are aliased onto it.
+    pub duplicate_members: Vec<MergeDuplicateMember>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct MergeSkip {
+    pub repo: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct MergeVersionMismatch {
+    pub name: String,
+    pub canonical_version: String,
+    pub aliased_version: String,
+    /// Repo whose metadata carried the aliased copy (the consumer).
+    pub repo: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct MergeDuplicateMember {
+    pub name: String,
+    pub kept_manifest_path: String,
+    pub dropped_manifest_path: String,
+}
+
+/// Different major, or different minor when major == 0 (cargo's caret
+/// semantics for pre-1.0 crates). Lenient on non-numeric parts: this feeds a
+/// warning, not resolution, so unparseable components compare as 0.
+fn semver_incompatible(a: &str, b: &str) -> bool {
+    fn major_minor(v: &str) -> (u64, u64) {
+        let mut it = v.split(['.', '-', '+']);
+        let major = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let minor = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        (major, minor)
+    }
+    let (a_major, a_minor) = major_minor(a);
+    let (b_major, b_minor) = major_minor(b);
+    a_major != b_major || (a_major == 0 && a_minor != b_minor)
 }
 
 /// Repo roots under a super-workspace root: immediate subdirectories that
@@ -1406,7 +1472,9 @@ pub(crate) fn discover_repo_roots(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for entry in fs::read_dir(root).with_context(|| format!("failed to read {}", root.display()))? {
         let entry = entry?;
-        if !entry.file_type()?.is_dir() {
+        // `Path::is_dir` follows symlinks (`entry.file_type()` does not);
+        // the umbrella-level check below already follows them.
+        if !entry.path().is_dir() {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
@@ -1483,7 +1551,41 @@ fn raw_metadata_json(manifest_path: &Path, args: &AnalyzeArgs) -> Result<serde_j
 /// member from another repo is unified onto that member (the registry or
 /// vendored copy becomes an alias of the local crate). This mirrors what the
 /// old root workspace produced via `[patch.crates-io]` entries.
-fn merged_metadata_for_repo_roots(root: &Path, args: &AnalyzeArgs) -> Result<Metadata> {
+fn merged_metadata_for_repo_roots(
+    root: &Path,
+    args: &AnalyzeArgs,
+) -> Result<(Metadata, MergeReceipt)> {
+    // Process-local memo: one `view` invocation builds the merged metadata
+    // from several call sites with identical feature flags, and the per-repo
+    // `cargo metadata` runs are the expensive part. Safe for a one-shot CLI;
+    // a long-lived server reusing this would need mtime-based invalidation.
+    type MemoKey = (PathBuf, bool, bool, Option<String>);
+    static MEMO: OnceLock<Mutex<HashMap<MemoKey, (Metadata, MergeReceipt)>>> = OnceLock::new();
+    let key: MemoKey = (
+        root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
+        args.all_features,
+        args.no_default_features,
+        args.features.clone(),
+    );
+    let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = memo
+        .lock()
+        .expect("merged-metadata memo poisoned")
+        .get(&key)
+    {
+        return Ok(hit.clone());
+    }
+    let computed = merged_metadata_for_repo_roots_uncached(root, args)?;
+    memo.lock()
+        .expect("merged-metadata memo poisoned")
+        .insert(key, computed.clone());
+    Ok(computed)
+}
+
+fn merged_metadata_for_repo_roots_uncached(
+    root: &Path,
+    args: &AnalyzeArgs,
+) -> Result<(Metadata, MergeReceipt)> {
     let repos = discover_repo_roots(root)?;
     if repos.is_empty() {
         return Err(anyhow!(
@@ -1492,12 +1594,24 @@ fn merged_metadata_for_repo_roots(root: &Path, args: &AnalyzeArgs) -> Result<Met
         ));
     }
 
-    let mut metas: Vec<serde_json::Value> = Vec::new();
+    let mut receipt = MergeReceipt::default();
+    let mut metas: Vec<(String, serde_json::Value)> = Vec::new();
     for repo in &repos {
+        let repo_name = repo
+            .strip_prefix(root)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| repo.display().to_string());
         match raw_metadata_json(&repo.join("Cargo.toml"), args) {
-            Ok(v) => metas.push(v),
+            Ok(v) => metas.push((repo_name, v)),
             // Skip-and-warn: one broken repo should not sink the whole view.
-            Err(e) => eprintln!("pkgrank: skipping {}: {:#}", repo.display(), e),
+            // The receipt carries the skip to artifacts (merged.skipped.json).
+            Err(e) => {
+                eprintln!("pkgrank: skipping {}: {:#}", repo.display(), e);
+                receipt.skipped.push(MergeSkip {
+                    repo: repo_name,
+                    error: format!("{:#}", e),
+                });
+            }
         }
     }
     if metas.is_empty() {
@@ -1506,11 +1620,18 @@ fn merged_metadata_for_repo_roots(root: &Path, args: &AnalyzeArgs) -> Result<Met
             root.display()
         ));
     }
+    receipt.merged_repos = metas.len();
 
     // Pass 1: canonical package id per first-party crate name (workspace
-    // members across all repos). First repo wins on duplicate crate names.
-    let mut canonical_by_name: HashMap<String, String> = HashMap::new();
-    for m in &metas {
+    // members across all repos). First repo wins on duplicate crate names;
+    // later definitions are warned about and recorded in the receipt.
+    struct CanonicalMember {
+        id: String,
+        version: String,
+        manifest_path: String,
+    }
+    let mut canonical_by_name: HashMap<String, CanonicalMember> = HashMap::new();
+    for (_repo, m) in &metas {
         let members: HashSet<&str> = m["workspace_members"]
             .as_array()
             .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
@@ -1519,26 +1640,64 @@ fn merged_metadata_for_repo_roots(root: &Path, args: &AnalyzeArgs) -> Result<Met
             let (Some(id), Some(name)) = (pkg["id"].as_str(), pkg["name"].as_str()) else {
                 continue;
             };
-            if members.contains(id) {
-                canonical_by_name
-                    .entry(name.to_string())
-                    .or_insert_with(|| id.to_string());
+            if !members.contains(id) {
+                continue;
             }
+            let manifest = pkg["manifest_path"].as_str().unwrap_or("").to_string();
+            if let Some(existing) = canonical_by_name.get(name) {
+                if existing.id != id {
+                    eprintln!(
+                        "pkgrank: duplicate crate name `{}`: keeping {}, ignoring {}",
+                        name, existing.manifest_path, manifest
+                    );
+                    receipt.duplicate_members.push(MergeDuplicateMember {
+                        name: name.to_string(),
+                        kept_manifest_path: existing.manifest_path.clone(),
+                        dropped_manifest_path: manifest,
+                    });
+                }
+                continue;
+            }
+            canonical_by_name.insert(
+                name.to_string(),
+                CanonicalMember {
+                    id: id.to_string(),
+                    version: pkg["version"].as_str().unwrap_or("").to_string(),
+                    manifest_path: manifest,
+                },
+            );
         }
     }
 
     // Pass 2: every other id carrying a first-party name (a registry/git/path
     // copy of a local crate, as seen from a consumer repo) is an alias.
+    // Unification is name-only; when the versions are semver-incompatible the
+    // edge is probably not what the consumer resolves to, so warn and record.
     let mut alias: HashMap<String, String> = HashMap::new();
-    for m in &metas {
+    for (repo, m) in &metas {
         for pkg in m["packages"].as_array().into_iter().flatten() {
             let (Some(id), Some(name)) = (pkg["id"].as_str(), pkg["name"].as_str()) else {
                 continue;
             };
-            if let Some(canon) = canonical_by_name.get(name) {
-                if id != canon {
-                    alias.insert(id.to_string(), canon.clone());
-                }
+            let Some(canon) = canonical_by_name.get(name) else {
+                continue;
+            };
+            if id == canon.id {
+                continue;
+            }
+            alias.insert(id.to_string(), canon.id.clone());
+            let version = pkg["version"].as_str().unwrap_or("");
+            if semver_incompatible(&canon.version, version) {
+                eprintln!(
+                    "pkgrank: unifying `{name}` {version} (used by {repo}) onto local {}: versions are semver-incompatible",
+                    canon.version
+                );
+                receipt.version_mismatches.push(MergeVersionMismatch {
+                    name: name.to_string(),
+                    canonical_version: canon.version.clone(),
+                    aliased_version: version.to_string(),
+                    repo: repo.clone(),
+                });
             }
         }
     }
@@ -1554,7 +1713,7 @@ fn merged_metadata_for_repo_roots(root: &Path, args: &AnalyzeArgs) -> Result<Met
     let mut seen_nodes: HashSet<String> = HashSet::new();
     let mut nodes: Vec<serde_json::Value> = Vec::new();
 
-    for m in &metas {
+    for (_repo, m) in &metas {
         for pkg in m["packages"].as_array().into_iter().flatten() {
             let Some(id) = pkg["id"].as_str() else {
                 continue;
@@ -1616,13 +1775,15 @@ fn merged_metadata_for_repo_roots(root: &Path, args: &AnalyzeArgs) -> Result<Met
     }
 
     // Use the first repo's metadata as the envelope (version, target dir, ...).
-    let mut merged = metas.swap_remove(0);
+    let mut merged = metas.swap_remove(0).1;
     merged["packages"] = serde_json::Value::Array(packages);
     merged["workspace_default_members"] = serde_json::Value::Array(members.clone());
     merged["workspace_members"] = serde_json::Value::Array(members);
     merged["resolve"] = serde_json::json!({ "nodes": nodes, "root": null });
     merged["workspace_root"] = serde_json::Value::String(root.to_string_lossy().to_string());
-    serde_json::from_value(merged).with_context(|| "failed to assemble merged cargo metadata")
+    let metadata: Metadata = serde_json::from_value(merged)
+        .with_context(|| "failed to assemble merged cargo metadata")?;
+    Ok((metadata, receipt))
 }
 
 pub(crate) fn build_graph(
@@ -3099,6 +3260,21 @@ fn run_sweep_local(args: &SweepLocalArgs) -> Result<()> {
             };
             let rows = analyze_rows(&analyze)?;
 
+            // Merged super-workspace mode: per-repo `cargo metadata` failures
+            // are swallowed inside the merge (skip-and-warn); surface them in
+            // the sweep summary so a failed repo doesn't silently vanish from
+            // the artifacts. Memoized, so this re-fetch is cheap.
+            if !root.join("Cargo.toml").exists() {
+                if let Ok((_, Some(receipt))) = metadata_for_path_with_receipt(&root, &analyze) {
+                    for s in &receipt.skipped {
+                        summary.failed.push(SweepFailure {
+                            repo: s.repo.clone(),
+                            error: s.error.clone(),
+                        });
+                    }
+                }
+            }
+
             // Write the full rows once (stable name).
             fs::write(
                 out_dir.join("root.workspace_only.json"),
@@ -3287,7 +3463,11 @@ pub(crate) fn analyze_rows_with_convergence(
 ) -> Result<(Vec<Row>, serde_json::Value)> {
     let mpath = manifest_path(&args.path)?;
 
-    if args.cache {
+    // The analysis cache is keyed on the root manifest path; a merged
+    // super-root has no root manifest (and its inputs span many repos'
+    // manifests), so bypass the cache there rather than caching under a
+    // phantom key that never invalidates.
+    if args.cache && mpath.exists() {
         let cache_root = args.path.join("evals/pkgrank/analysis_cache");
         let key = analysis_cache_key(
             &mpath,
@@ -3305,7 +3485,7 @@ pub(crate) fn analyze_rows_with_convergence(
                 return Ok((rows, entry.convergence));
             }
         }
-        let (rows, convergence) = analyze_uncached(&mpath, args)?;
+        let (rows, convergence) = analyze_uncached(args)?;
         let entry = AnalysisCacheEntry {
             schema_version: 1,
             rows: rows.clone(),
@@ -3323,12 +3503,14 @@ pub(crate) fn analyze_rows_with_convergence(
         return Ok((rows, convergence));
     }
 
-    analyze_uncached(&mpath, args)
+    analyze_uncached(args)
 }
 
-fn analyze_uncached(mpath: &PathBuf, args: &AnalyzeArgs) -> Result<(Vec<Row>, serde_json::Value)> {
-    let metadata = metadata_for(mpath, args)
-        .with_context(|| format!("cargo metadata failed for {}", mpath.display()))?;
+fn analyze_uncached(args: &AnalyzeArgs) -> Result<(Vec<Row>, serde_json::Value)> {
+    // Route through metadata_for_path so a rootless super-root takes the
+    // merged repo-roots path; `metadata_for` would fail on the missing
+    // root manifest.
+    let metadata = metadata_for_path(&args.path, args)?;
     let (graph, _nodes) = build_graph(&metadata, args)?;
     let (mut rows, convergence) = compute_rows_with_convergence(&metadata, &graph)?;
     sort_rows_by_metric(&mut rows, args.metric);
@@ -4023,6 +4205,41 @@ fn run_view(args: &ViewArgs) -> Result<()> {
             recent_max: 200,
         };
         run_sweep_local(&sweep)?;
+
+        // Merged-mode receipt: in a rootless super-workspace, repos the merge
+        // skipped (and name/version anomalies) must reach artifacts, not just
+        // stderr. The merged metadata is memoized, so this re-fetch is cheap.
+        if !root.join("Cargo.toml").exists() {
+            let analyze = AnalyzeArgs {
+                ecosystem: None,
+                path: root.clone(),
+                metric: Metric::Pagerank,
+                top: args.local_top,
+                dev: false,
+                build: false,
+                workspace_only: false,
+                all_features: false,
+                no_default_features: false,
+                features: None,
+                format: OutputFormat::Json,
+                stats: false,
+                json_limit: None,
+                cache: false,
+                cache_refresh: false,
+            };
+            if let Ok((_, Some(receipt))) = metadata_for_path_with_receipt(&root, &analyze) {
+                let receipt_path = out_dir.join("merged.skipped.json");
+                fs::write(&receipt_path, serde_json::to_string_pretty(&receipt)?)?;
+                if !receipt.skipped.is_empty() {
+                    eprintln!(
+                        "pkgrank: merged {} repos, {} skipped (see {})",
+                        receipt.merged_repos,
+                        receipt.skipped.len(),
+                        receipt_path.display()
+                    );
+                }
+            }
+        }
     }
 
     if matches!(args.mode, ViewMode::CratesIo | ViewMode::Both) {
