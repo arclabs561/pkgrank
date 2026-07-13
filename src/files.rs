@@ -1924,10 +1924,9 @@ fn extract_quoted_string(s: &str) -> Option<String> {
     let s = s.trim();
     let (quote, rest) = if let Some(rest) = s.strip_prefix('\'') {
         ('\'', rest)
-    } else if let Some(rest) = s.strip_prefix('"') {
-        ('"', rest)
     } else {
-        return None;
+        let rest = s.strip_prefix('"')?;
+        ('"', rest)
     };
     let end = rest.find(quote)?;
     Some(rest[..end].to_string())
