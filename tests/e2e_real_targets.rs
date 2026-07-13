@@ -51,27 +51,35 @@ fn analyze_consumers_pagerank_on_own_graph() {
     assert!(!rows.is_empty());
 }
 
-// Super-workspace tests: require PKGRANK_E2E_SUPERWORKSPACE=1 and sibling repos.
-// These exercise cross-repo analysis but are opt-in since they depend on local layout.
+// Super-workspace tests require PKGRANK_E2E_SUPERWORKSPACE=1 and sibling repos.
+// Exercise the directory-oriented view command against the parent directory.
 #[test]
-fn analyze_on_super_workspace_root() {
+fn view_on_super_workspace_root() {
     if std::env::var("PKGRANK_E2E_SUPERWORKSPACE").ok().as_deref() != Some("1") {
         return;
     }
+    let out_dir = tempfile::tempdir().expect("create view output directory");
+    let out_path = out_dir.path().to_string_lossy();
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("pkgrank"));
     cmd.args([
-        "--format",
-        "json",
-        "--workspace-only=true",
-        "--metric",
-        "pagerank",
-        "-n",
-        "5",
+        "view",
+        "--root",
         "..",
+        "--out",
+        out_path.as_ref(),
+        "--mode",
+        "local",
     ]);
-    let v = parse_json_stdout(&mut cmd);
-    assert_eq!(v.get("ok").and_then(|x| x.as_bool()), Some(true));
-    assert!(v.get("rows").and_then(|x| x.as_array()).is_some());
+    let output = cmd.output().expect("spawn pkgrank view");
+    assert!(
+        output.status.success(),
+        "pkgrank view failed (status={:?})\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(out_dir.path().join("pkgrank_overview.html").is_file());
+    assert!(out_dir.path().join("sweep.summary.json").is_file());
 }
 
 #[test]
