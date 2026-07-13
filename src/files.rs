@@ -1,5 +1,4 @@
 use anyhow::Result;
-use petgraph::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -13,7 +12,7 @@ use super::*;
 
 #[derive(Parser, Debug, Clone)]
 pub(crate) struct FilesArgs {
-    /// Project root directory or GitHub URL (e.g. https://github.com/owner/repo).
+    /// Project root directory or GitHub URL (e.g. <https://github.com/owner/repo>).
     #[arg(default_value = ".")]
     pub path: String,
 
@@ -2269,7 +2268,7 @@ pub(crate) struct FileRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub churn_risk: Option<f64>,
     /// Files that most frequently change in the same commit (temporal coupling).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub co_changers: Vec<(String, usize)>,
     /// Instability: out_degree / (in_degree + out_degree). 0 = stable, 1 = unstable.
     pub instability: f64,
@@ -2279,7 +2278,7 @@ pub(crate) struct FileRow {
     /// Structural role + stability-volatility quadrant.
     pub structure: String,
     /// External packages this file imports (ecosystem-level deps).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub external_deps: Vec<String>,
 }
 
@@ -2291,7 +2290,7 @@ pub(crate) struct FilesResult {
     pub ecosystem: Ecosystem,
     pub orphan_count: usize,
     pub cycles: Vec<Vec<String>>,
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub direct_edges: Vec<(String, String)>,
 }
 
@@ -2690,10 +2689,10 @@ fn contract_to_directories(
 }
 
 /// Detect cross-language seams: Python files importing Rust PyO3 modules.
-/// Creates edges from Python files to the Rust lib.rs that defines the #[pymodule].
+/// Creates edges from Python files to the Rust lib.rs that defines the `#[pymodule]`.
 /// Detect cross-language FFI seams.
-/// PyO3: Python files importing Rust #[pymodule] modules.
-/// NAPI: JS/TS files importing Rust #[napi] modules.
+/// PyO3: Python files importing Rust `#[pymodule]` modules.
+/// NAPI: JS/TS files importing Rust `#[napi]` modules.
 fn detect_ffi_seams(root: &Path, files: &[PathBuf], ecosystems: &[Ecosystem]) -> Vec<FileEdge> {
     let mut edges = Vec::new();
 
@@ -2814,7 +2813,7 @@ fn is_url(s: &str) -> bool {
     s.starts_with("https://") || s.starts_with("http://") || s.starts_with("git@")
 }
 
-/// Expand shorthand like "owner/repo" to "https://github.com/owner/repo".
+/// Expand shorthand like `owner/repo` to `https://github.com/owner/repo`.
 fn expand_uri(s: &str) -> String {
     if is_url(s) || PathBuf::from(s).exists() {
         return s.to_string();
@@ -2860,9 +2859,13 @@ fn expand_uri(s: &str) -> String {
 }
 
 /// Compute a cache key from file paths + mtimes + analysis args.
+const FILES_CACHE_FORMAT_VERSION: u8 = 2;
+const FILES_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
 fn files_cache_key(files: &[PathBuf], args: &FilesArgs) -> u64 {
     let mut material = format!(
-        "v={}\necosystem={:?}\ndir={}\ngit={}\ngit_days={}\ntests={}\nall={}\n",
+        "cache_format={}\nv={}\necosystem={:?}\ndir={}\ngit={}\ngit_days={}\ntests={}\nall={}\n",
+        FILES_CACHE_FORMAT_VERSION,
         env!("CARGO_PKG_VERSION"),
         args.ecosystem,
         args.directory,
@@ -2885,16 +2888,21 @@ fn files_cache_key(files: &[PathBuf], args: &FilesArgs) -> u64 {
 }
 
 fn files_cache_read(cache_dir: &Path, key: u64) -> Option<FilesResult> {
-    let path = cache_dir.join(format!("files_{:016x}.bin", key));
+    let path = cache_dir.join(format!("files_{:016x}.json", key));
     let raw = std::fs::read(&path).ok()?;
-    bincode::deserialize(&raw).ok()
+    if raw.len() > FILES_CACHE_MAX_BYTES {
+        return None;
+    }
+    serde_json::from_slice(&raw).ok()
 }
 
 fn files_cache_write(cache_dir: &Path, key: u64, result: &FilesResult) {
     let _ = std::fs::create_dir_all(cache_dir);
-    let path = cache_dir.join(format!("files_{:016x}.bin", key));
-    if let Ok(bytes) = bincode::serialize(result) {
-        let _ = std::fs::write(&path, bytes);
+    let path = cache_dir.join(format!("files_{:016x}.json", key));
+    if let Ok(bytes) = serde_json::to_vec(result) {
+        if bytes.len() <= FILES_CACHE_MAX_BYTES {
+            let _ = std::fs::write(&path, bytes);
+        }
     }
 }
 

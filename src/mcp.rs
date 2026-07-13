@@ -2,7 +2,6 @@
 
 pub(crate) use rmcp::ErrorData as McpError;
 use rmcp::{
-    handler::server::router::tool::ToolRouter as RmcpToolRouter,
     handler::server::wrapper::Parameters,
     model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
@@ -370,6 +369,7 @@ pub(crate) struct PkgrankModulesSweepToolArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[allow(dead_code)] // instantiated by rmcp's generated debug-tool router
 pub(crate) struct PkgrankTlcCratesToolArgs {
     #[serde(default)]
     pub root: Option<String>,
@@ -384,6 +384,7 @@ pub(crate) struct PkgrankTlcCratesToolArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[allow(dead_code)] // instantiated by rmcp's generated debug-tool router
 pub(crate) struct PkgrankTlcReposToolArgs {
     #[serde(default)]
     pub root: Option<String>,
@@ -396,6 +397,7 @@ pub(crate) struct PkgrankTlcReposToolArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[allow(dead_code)] // instantiated by rmcp's generated debug-tool router
 pub(crate) struct PkgrankInvariantsToolArgs {
     #[serde(default)]
     pub root: Option<String>,
@@ -404,6 +406,7 @@ pub(crate) struct PkgrankInvariantsToolArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[allow(dead_code)] // instantiated by rmcp's generated debug-tool router
 pub(crate) struct PkgrankPprSummaryToolArgs {
     #[serde(default)]
     pub root: Option<String>,
@@ -472,7 +475,7 @@ pub(crate) struct PkgrankPolyglotToolArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct PkgrankFilesToolArgs {
-    /// Project path or GitHub URL (e.g. "owner/repo" or "https://github.com/owner/repo").
+    /// Project path or GitHub URL (e.g. `owner/repo` or `https://github.com/owner/repo`).
     #[serde(default)]
     pub path: Option<String>,
     /// Ecosystem: "cargo", "npm", "python", "go". Auto-detected if omitted.
@@ -531,23 +534,17 @@ pub(crate) fn mcp_ok(
 // - keep tool surface small and stable
 
 #[derive(Clone)]
-pub(crate) struct PkgrankStdioMcpFull {
-    tool_router: RmcpToolRouter<Self>,
-}
+pub(crate) struct PkgrankStdioMcpFull;
 
 // Toolset selection is runtime via `PKGRANK_MCP_TOOLSET` (default: slim).
 
 #[derive(Clone)]
 #[allow(dead_code)]
-pub(crate) struct PkgrankStdioMcpDebug {
-    tool_router: RmcpToolRouter<Self>,
-}
+pub(crate) struct PkgrankStdioMcpDebug;
 
 #[derive(Clone)]
 #[allow(dead_code)] // constructed when `mcp-debug` is ON
-pub(crate) struct PkgrankStdioMcpSlim {
-    tool_router: RmcpToolRouter<Self>,
-}
+pub(crate) struct PkgrankStdioMcpSlim;
 
 // ---------------------------------------------------------------------------
 // PkgrankStdioMcpDebug impl
@@ -557,9 +554,7 @@ pub(crate) struct PkgrankStdioMcpSlim {
 impl PkgrankStdioMcpDebug {
     #[allow(dead_code)]
     fn new() -> Self {
-        Self {
-            tool_router: Self::tool_router(),
-        }
+        Self
     }
 
     // Debug toolset: include the full surface plus internal artifact inspection tools.
@@ -769,18 +764,13 @@ impl PkgrankStdioMcpDebug {
 #[tool_handler]
 impl rmcp::ServerHandler for PkgrankStdioMcpDebug {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            instructions: Some(
-                "Tools for ranking crates/repos in the local Cargo workspace (pkgrank).\n\n\
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+            "Tools for ranking crates/repos in the local Cargo workspace (pkgrank).\n\n\
                  Toolsets:\n\
                  - default: PKGRANK_MCP_TOOLSET=slim (small surface)\n\
                  - opt-in:  PKGRANK_MCP_TOOLSET=full (includes module/type graph tools)\n\
-                 - opt-in:  PKGRANK_MCP_TOOLSET=debug (full + internal artifact inspection tools)"
-                    .to_string(),
-            ),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
-        }
+                 - opt-in:  PKGRANK_MCP_TOOLSET=debug (full + internal artifact inspection tools)",
+        )
     }
 }
 
@@ -792,9 +782,7 @@ impl rmcp::ServerHandler for PkgrankStdioMcpDebug {
 impl PkgrankStdioMcpFull {
     #[allow(dead_code)]
     pub(crate) fn new() -> Self {
-        Self {
-            tool_router: Self::tool_router(),
-        }
+        Self
     }
 
     pub(crate) fn default_root(params_root: Option<&str>) -> PathBuf {
@@ -1526,18 +1514,13 @@ impl PkgrankStdioMcpFull {
 #[tool_handler]
 impl rmcp::ServerHandler for PkgrankStdioMcpFull {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            instructions: Some(
-                "Tools for ranking crates/repos in the local Cargo workspace (pkgrank).\n\n\
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+            "Tools for ranking crates/repos in the local Cargo workspace (pkgrank).\n\n\
                  Toolsets:\n\
                  - default: PKGRANK_MCP_TOOLSET=slim (small surface)\n\
                  - opt-in:  PKGRANK_MCP_TOOLSET=full (includes module/type graph tools)\n\
-                 - opt-in:  PKGRANK_MCP_TOOLSET=debug (internal artifact inspection tools)"
-                    .to_string(),
-            ),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
-        }
+                 - opt-in:  PKGRANK_MCP_TOOLSET=debug (internal artifact inspection tools)",
+        )
     }
 }
 
@@ -1549,9 +1532,7 @@ impl rmcp::ServerHandler for PkgrankStdioMcpFull {
 #[tool_router]
 impl PkgrankStdioMcpSlim {
     fn new() -> Self {
-        Self {
-            tool_router: Self::tool_router(),
-        }
+        Self
     }
 
     #[tool(
@@ -1649,11 +1630,7 @@ impl PkgrankStdioMcpSlim {
         &self,
         params: Parameters<PkgrankAnalyzeToolArgs>,
     ) -> Result<CallToolResult, McpError> {
-        PkgrankStdioMcpFull {
-            tool_router: PkgrankStdioMcpFull::tool_router(),
-        }
-        .pkgrank_analyze(params)
-        .await
+        PkgrankStdioMcpFull::new().pkgrank_analyze(params).await
     }
 
     #[tool(description = "Get repo details from artifacts")]
@@ -1699,11 +1676,7 @@ impl PkgrankStdioMcpSlim {
         &self,
         params: Parameters<PkgrankSnapshotArgs>,
     ) -> Result<CallToolResult, McpError> {
-        PkgrankStdioMcpFull {
-            tool_router: PkgrankStdioMcpFull::tool_router(),
-        }
-        .pkgrank_snapshot(params)
-        .await
+        PkgrankStdioMcpFull::new().pkgrank_snapshot(params).await
     }
 
     #[tool(description = "Compare two artifact directories (TLC deltas)")]
@@ -1711,11 +1684,9 @@ impl PkgrankStdioMcpSlim {
         &self,
         params: Parameters<PkgrankCompareRunsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        PkgrankStdioMcpFull {
-            tool_router: PkgrankStdioMcpFull::tool_router(),
-        }
-        .pkgrank_compare_runs(params)
-        .await
+        PkgrankStdioMcpFull::new()
+            .pkgrank_compare_runs(params)
+            .await
     }
 
     #[tool(
@@ -1734,17 +1705,12 @@ impl PkgrankStdioMcpSlim {
 #[tool_handler]
 impl rmcp::ServerHandler for PkgrankStdioMcpSlim {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            instructions: Some(
-                "Tools for ranking crates/repos in the local Cargo workspace (pkgrank).\n\n\
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+            "Tools for ranking crates/repos in the local Cargo workspace (pkgrank).\n\n\
                  Toolsets:\n\
                  - default: PKGRANK_MCP_TOOLSET=slim (small surface)\n\
                  - opt-in:  PKGRANK_MCP_TOOLSET=full (includes module/type graph tools)\n\
-                 - opt-in:  PKGRANK_MCP_TOOLSET=debug (internal artifact inspection tools)"
-                    .to_string(),
-            ),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
-        }
+                 - opt-in:  PKGRANK_MCP_TOOLSET=debug (internal artifact inspection tools)",
+        )
     }
 }

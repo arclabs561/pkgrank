@@ -2,7 +2,7 @@
 name = "pkgrank"
 version = "0.5.1"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 authors = ["Arc <attobop@gmail.com>"]
 repository = "https://github.com/arclabs561/pkgrank"
@@ -28,13 +28,12 @@ graphops = { version = "0.1.4", features = ["petgraph"] }
 petgraph = "0.6"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-bincode = "1.3"
 rusqlite = { version = "0.33", features = ["bundled"] }
 dirs-next = "2.0"
 toml = "0.8"
 ureq = { version = "2.10", features = ["json"] }
 tokio = { version = "1.40", features = ["full"], optional = true }
-rmcp = { version = "0.12.0", optional = true, features = [
+rmcp = { version = "=1.4.0", optional = true, features = [
   "macros",
   "server",
   "client",
@@ -42,6 +41,8 @@ rmcp = { version = "0.12.0", optional = true, features = [
   "transport-child-process",
   "schemars",
 ] }
+# rmcp's caret macro dependency can resolve to an incompatible later 1.x API.
+rmcp-macros = { version = "=1.4.0", optional = true }
 schemars = { version = "1.2.0", optional = true, features = ["derive"] }
 glob = "0.3.3"
 
@@ -53,7 +54,7 @@ tempfile = "3"
 [features]
 # Default should "just work" when run as a Cursor MCP server.
 default = ["stdio"]
-stdio = ["dep:tokio", "dep:rmcp", "dep:schemars"]
+stdio = ["dep:tokio", "dep:rmcp", "dep:rmcp-macros", "dep:schemars"]
 # Expose extra/debug MCP tools (wider tool surface).
 mcp-debug = []
 

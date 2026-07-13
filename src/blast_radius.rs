@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use petgraph::prelude::*;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::path::PathBuf;

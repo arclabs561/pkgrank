@@ -104,7 +104,7 @@ enum Command {
     BlastRadius(BlastRadiusArgs),
     /// Combine cargo outdated with centrality ranking to prioritize upgrades.
     UpgradePriority(UpgradePriorityArgs),
-    /// [Deprecated] Use `pkgrank analyze --ecosystem <eco>` instead.
+    /// Deprecated: use `pkgrank analyze --ecosystem <eco>` instead.
     #[command(hide = true)]
     Polyglot(PolyglotArgs),
     /// Query the persistent SQLite store (populated by `pkgrank files --store`).

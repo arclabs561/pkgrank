@@ -10,7 +10,7 @@ fn main() {
 
 #[cfg(feature = "stdio")]
 use rmcp::{
-    model::CallToolRequestParam,
+    model::CallToolRequestParams,
     service::ServiceExt,
     transport::{ConfigureCommandExt, TokioChildProcess},
 };
@@ -140,7 +140,7 @@ fn extract_wrapped_json(tool: &str, call: &rmcp::model::CallToolResult) -> anyho
 }
 
 #[cfg(feature = "stdio")]
-async fn spawn_and_check(bin: &Path, root: &Path, toolset: &str) -> anyhow::Result<()> {
+async fn spawn_and_check(bin: &Path, root: &Path, out: &Path, toolset: &str) -> anyhow::Result<()> {
     eprintln!(
         "spawning: {} mcp-stdio (toolset={})",
         bin.display(),
@@ -162,52 +162,50 @@ async fn spawn_and_check(bin: &Path, root: &Path, toolset: &str) -> anyhow::Resu
 
     // Quick wrapper-schema checks on a couple core tools.
     let view = service
-        .call_tool(CallToolRequestParam {
-            name: "pkgrank_view".into(),
-            arguments: Some(
-                serde_json::json!({"root": root.display().to_string(), "mode": "local"})
-                    .as_object()
-                    .cloned()
-                    .unwrap_or_default(),
+        .call_tool(
+            CallToolRequestParams::new("pkgrank_view").with_arguments(
+                serde_json::json!({
+                    "root": root.display().to_string(),
+                    "out": out.display().to_string(),
+                    "mode": "local"
+                })
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
             ),
-        })
+        )
         .await?;
     let _ = extract_wrapped_json("pkgrank_view", &view)?;
 
-    let triage = service
-        .call_tool(CallToolRequestParam {
-            name: "pkgrank_triage".into(),
-            arguments: Some(
-                serde_json::json!({"root": root.display().to_string(), "limit": 5, "ppr_top": 5})
+    let analyze = service
+        .call_tool(
+            CallToolRequestParams::new("pkgrank_analyze").with_arguments(
+                serde_json::json!({"path": root.display().to_string(), "top": 5})
                     .as_object()
                     .cloned()
                     .unwrap_or_default(),
             ),
-        })
+        )
         .await?;
-    let triage_v = extract_wrapped_json("pkgrank_triage", &triage)?;
-    anyhow::ensure!(
-        triage_v
-            .get("summary_text")
-            .and_then(|x| x.as_str())
-            .is_some(),
-        "pkgrank_triage: expected summary_text"
-    );
+    let _ = extract_wrapped_json("pkgrank_analyze", &analyze)?;
 
     // Debug-only tool should work in debug toolset.
     if toolset == "debug" {
-        let inv = service
-            .call_tool(CallToolRequestParam {
-                name: "pkgrank_invariants".into(),
-                arguments: Some(
-                    serde_json::json!({"root": root.display().to_string()})
-                        .as_object()
-                        .cloned()
-                        .unwrap_or_default(),
+        let tlc = service
+            .call_tool(
+                CallToolRequestParams::new("pkgrank_tlc_crates").with_arguments(
+                    serde_json::json!({
+                        "root": root.display().to_string(),
+                        "out": out.display().to_string(),
+                        "limit": 5
+                    })
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default(),
                 ),
-            })
+            )
             .await?;
-        let _ = extract_wrapped_json("pkgrank_invariants", &inv)?;
+        let _ = extract_wrapped_json("pkgrank_tlc_crates", &tlc)?;
     }
 
     service.cancel().await?;
@@ -218,7 +216,6 @@ async fn spawn_and_check(bin: &Path, root: &Path, toolset: &str) -> anyhow::Resu
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let pkgrank_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let dev_root = pkgrank_root.parent().unwrap().to_path_buf();
     let bin = pkgrank_root.join("target/debug/pkgrank");
     // Ensure the server binary exists *and* matches current sources/features.
     // (The example itself can compile without rebuilding the pkgrank binary.)
@@ -231,8 +228,9 @@ async fn main() -> anyhow::Result<()> {
     anyhow::ensure!(bin.exists(), "expected pkgrank binary at {}", bin.display());
 
     // Validate toolsets + schema wrapper contract.
-    spawn_and_check(&bin, &dev_root, "slim").await?;
-    spawn_and_check(&bin, &dev_root, "full").await?;
-    spawn_and_check(&bin, &dev_root, "debug").await?;
+    let out = tempfile::tempdir()?;
+    spawn_and_check(&bin, &pkgrank_root, out.path(), "slim").await?;
+    spawn_and_check(&bin, &pkgrank_root, out.path(), "full").await?;
+    spawn_and_check(&bin, &pkgrank_root, out.path(), "debug").await?;
     Ok(())
 }
