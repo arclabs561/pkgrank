@@ -42,7 +42,7 @@ rmcp = { version = "=1.4.0", optional = true, features = [
   "schemars",
 ] }
 # rmcp's caret macro dependency can resolve to an incompatible later 1.x API.
-rmcp-macros = { version = "=1.4.0", optional = true }
+rmcp-macros = { version = "=2.1.0", optional = true }
 schemars = { version = "1.2.0", optional = true, features = ["derive"] }
 glob = "0.3.3"
 
