@@ -84,7 +84,7 @@ pkgrank blast-radius express path/to/npm-project
 | `pkgrank blast-radius <package>` | Transitive dependents of one package |
 
 `files` supports Rust, Python, JS/TS/Svelte/Vue, and Go. It respects
-`.gitignore` through `git ls-files` for git repos, falls back to a bounded walk
+`.gitignore` through `git ls-files` for git repos, falls back to a filtered walk
 for non-git directories, and excludes generated files, fixtures, vendor trees,
 and docs by default.
 
