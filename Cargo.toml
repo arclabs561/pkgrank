@@ -33,7 +33,7 @@ dirs-next = "2.0"
 toml = "0.8"
 ureq = { version = "2.10", features = ["json"] }
 tokio = { version = "1.40", features = ["full"], optional = true }
-rmcp = { version = "=1.4.0", optional = true, features = [
+rmcp = { version = "=2.1.0", optional = true, features = [
   "macros",
   "server",
   "client",
