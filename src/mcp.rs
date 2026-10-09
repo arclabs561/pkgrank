@@ -3,7 +3,7 @@
 pub(crate) use rmcp::ErrorData as McpError;
 use rmcp::{
     handler::server::wrapper::Parameters,
-    model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
+    model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
     transport::stdio,
     ServiceExt,
@@ -517,7 +517,7 @@ pub(crate) fn mcp_ok(
         "summary_text": summary_text,
         "result": result,
     });
-    Ok(CallToolResult::success(vec![Content::text(
+    Ok(CallToolResult::success(vec![ContentBlock::text(
         payload.to_string(),
     )]))
 }
@@ -530,7 +530,7 @@ pub(crate) fn mcp_ok(
 //
 // Mirrors `threadlog mcp-stdio`:
 // - keep stdout clean (transport)
-// - return JSON payloads as Content::text
+// - return JSON payloads as ContentBlock::text
 // - keep tool surface small and stable
 
 #[derive(Clone)]

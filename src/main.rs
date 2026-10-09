@@ -1161,7 +1161,7 @@ fn run_query(args: &QueryArgs) -> Result<()> {
                 "pr", "in", "blast", "churn", "file", "project"
             );
             println!("{:\u{2500}<90}", "");
-            let mut rows = stmt.query(rusqlite::params![pattern, args.top])?;
+            let mut rows = stmt.query(rusqlite::params![pattern, args.top as i64])?;
             while let Some(row) = rows.next()? {
                 let project: String = row.get(0)?;
                 let file: String = row.get(1)?;

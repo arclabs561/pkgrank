@@ -148,10 +148,11 @@ pub(crate) fn store_snapshot(
             project_id,
             now,
             git_rev,
-            result.nodes,
-            result.edges,
-            result.cycles.len(),
-            result.orphan_count,
+            // rusqlite has no ToSql for usize (0.34+); counts fit in i64.
+            result.nodes as i64,
+            result.edges as i64,
+            result.cycles.len() as i64,
+            result.orphan_count as i64,
         ],
     )?;
     let snapshot_id = tx.last_insert_rowid();
@@ -172,11 +173,11 @@ pub(crate) fn store_snapshot(
             row.pagerank,
             row.consumers_pagerank,
             row.betweenness,
-            row.in_degree,
-            row.out_degree,
-            row.dependents,
-            row.dependencies,
-            row.commits,
+            row.in_degree as i64,
+            row.out_degree as i64,
+            row.dependents as i64,
+            row.dependencies as i64,
+            row.commits.map(|c| c as i64),
             row.churn_risk,
             row.instability,
             row.structure,
@@ -214,7 +215,7 @@ pub(crate) fn query_top_churn(
         LIMIT ?1",
     )?;
     let rows = stmt
-        .query_map(params![limit], |row| {
+        .query_map(params![limit as i64], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -253,7 +254,7 @@ pub(crate) fn query_drift(
         LIMIT ?2",
     )?;
     let rows = stmt
-        .query_map(params![project_path, limit], |row| {
+        .query_map(params![project_path, limit as i64], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, f64>(1)?,
@@ -374,7 +375,7 @@ pub(crate) fn query_top_deps(conn: &Connection, limit: usize) -> Result<Vec<(Str
         LIMIT ?1",
     )?;
     let rows = stmt
-        .query_map(params![limit], |row| {
+        .query_map(params![limit as i64], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?
         .filter_map(|r| r.ok())
