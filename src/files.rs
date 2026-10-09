@@ -3823,3 +3823,140 @@ fn print_focus(query: &str, result: &FilesResult) {
         }
     }
 }
+
+#[cfg(test)]
+mod import_parser_tests {
+    //! Golden import graphs: one small project per ecosystem, each with the
+    //! edges its source files declare, checked as exact sets.
+
+    use super::*;
+    use std::collections::BTreeSet;
+
+    fn project(files: &[(&str, &str)]) -> (tempfile::TempDir, Vec<PathBuf>) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = Vec::new();
+        for (rel, body) in files {
+            let path = dir.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, body).unwrap();
+            paths.push(path);
+        }
+        (dir, paths)
+    }
+
+    fn edge_set(root: &Path, edges: &[FileEdge]) -> BTreeSet<(String, String)> {
+        // Compare as paths, component-wise (so `src/./b.ts` == `src/b.ts`),
+        // which is the equality the graph builder's PathBuf keys use.
+        let rel = |p: &Path| {
+            let rel: PathBuf = p.strip_prefix(root).unwrap().components().collect();
+            rel.to_string_lossy().replace('\\', "/")
+        };
+        edges.iter().map(|e| (rel(&e.from), rel(&e.to))).collect()
+    }
+
+    fn set(pairs: &[(&str, &str)]) -> BTreeSet<(String, String)> {
+        pairs
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    }
+
+    fn sources(paths: &[PathBuf], ext: &[&str]) -> Vec<PathBuf> {
+        paths
+            .iter()
+            .filter(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| ext.contains(&e))
+            })
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn rust_mod_and_use_edges() {
+        let (dir, paths) = project(&[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+            ),
+            ("src/lib.rs", "mod a;\nmod b;\nmod c;\n"),
+            (
+                "src/a.rs",
+                "use crate::b::Thing;\nuse crate::{\n    c::Other,\n};\n",
+            ),
+            ("src/b.rs", "pub struct Thing;\n"),
+            ("src/c.rs", "// use crate::a::Nothing;\npub struct Other;\n"),
+        ]);
+        let edges = parse_rust_imports(dir.path(), &sources(&paths, &["rs"]));
+        assert_eq!(
+            edge_set(dir.path(), &edges),
+            set(&[
+                ("src/lib.rs", "src/a.rs"),
+                ("src/lib.rs", "src/b.rs"),
+                ("src/lib.rs", "src/c.rs"),
+                ("src/a.rs", "src/b.rs"),
+                ("src/a.rs", "src/c.rs"),
+            ])
+        );
+    }
+
+    #[test]
+    fn python_absolute_and_relative_import_edges() {
+        let (dir, paths) = project(&[
+            ("pkg/__init__.py", ""),
+            ("pkg/a.py", "from pkg import b\nimport pkg.c\n"),
+            ("pkg/b.py", "from . import c\n"),
+            ("pkg/c.py", "x = 1\n"),
+        ]);
+        let edges = parse_python_imports(dir.path(), &sources(&paths, &["py"]));
+        let got = edge_set(dir.path(), &edges);
+        for e in [
+            ("pkg/a.py", "pkg/b.py"),
+            ("pkg/a.py", "pkg/c.py"),
+            ("pkg/b.py", "pkg/c.py"),
+        ] {
+            assert!(
+                got.contains(&(e.0.to_string(), e.1.to_string())),
+                "missing {e:?} in {got:?}"
+            );
+        }
+        assert!(!got.iter().any(|(from, _)| from == "pkg/c.py"), "{got:?}");
+    }
+
+    #[test]
+    fn js_import_require_and_reexport_edges() {
+        let (dir, paths) = project(&[
+            ("package.json", "{\"name\": \"demo\"}\n"),
+            (
+                "src/a.js",
+                "import { b } from './b';\nconst c = require('./c');\n",
+            ),
+            ("src/b.ts", "export * from \"./c\";\n"),
+            ("src/c.js", "module.exports = {};\n"),
+        ]);
+        let edges = parse_js_imports(dir.path(), &sources(&paths, &["js", "ts"]));
+        assert_eq!(
+            edge_set(dir.path(), &edges),
+            set(&[
+                ("src/a.js", "src/b.ts"),
+                ("src/a.js", "src/c.js"),
+                ("src/b.ts", "src/c.js"),
+            ])
+        );
+    }
+
+    #[test]
+    fn go_module_import_edges() {
+        let (dir, paths) = project(&[
+            ("go.mod", "module example.com/demo\n\ngo 1.22\n"),
+            ("main.go", "package main\n\nimport (\n\t\"fmt\"\n\t\"example.com/demo/util\"\n)\n\nfunc main() { fmt.Println(util.X) }\n"),
+            ("util/u.go", "package util\n\nconst X = 1\n"),
+        ]);
+        let edges = parse_go_imports_text(dir.path(), &sources(&paths, &["go"]));
+        assert_eq!(
+            edge_set(dir.path(), &edges),
+            set(&[("main.go", "util/u.go")])
+        );
+    }
+}

@@ -64,7 +64,7 @@ fn pagerank_chain_last_node_highest() {
     let max_idx = scores
         .iter()
         .enumerate()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .max_by(|a, b| a.1.total_cmp(b.1))
         .unwrap()
         .0;
     assert_eq!(max_idx, 3, "sink node D should have highest PageRank");
@@ -109,7 +109,7 @@ fn betweenness_path_graph_center_highest() {
     let max_idx = bc
         .iter()
         .enumerate()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .max_by(|a, b| a.1.total_cmp(b.1))
         .unwrap()
         .0;
     assert_eq!(max_idx, 2, "center node should have highest betweenness");
@@ -307,7 +307,7 @@ fn ppr_personalized_node_gets_highest_score() {
     let max_idx = scores
         .iter()
         .enumerate()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .max_by(|a, b| a.1.total_cmp(b.1))
         .unwrap()
         .0;
     assert_eq!(
