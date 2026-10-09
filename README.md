@@ -32,10 +32,12 @@ Rank files in the current repo:
 pkgrank files .
 ```
 
-When stdout is piped, output is JSON:
+When stdout is piped, output is JSON (abridged here):
 
 ```json
 {
+  "schema_version": 1,
+  "ok": true,
   "command": "files",
   "ecosystem": "rust",
   "nodes": 10,
@@ -82,6 +84,7 @@ pkgrank blast-radius express path/to/npm-project
 | `pkgrank files <path-or-repo>` | Source files in a project import graph |
 | `pkgrank [path]` | Packages in a dependency graph |
 | `pkgrank blast-radius <package>` | Transitive dependents of one package |
+| `pkgrank mcp-stdio` | Runs an MCP server on stdio (default `stdio` feature) |
 
 `files` supports Rust, Python, JS/TS/Svelte/Vue, and Go. It respects
 `.gitignore` through `git ls-files` for git repos, falls back to a filtered walk
