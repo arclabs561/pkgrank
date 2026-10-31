@@ -220,7 +220,28 @@ fn compute_blast_radius_polyglot(
 
     let (graph, map) = dep_graph::build_dep_graph(&packages, &edges);
 
-    let target_idx = map.get(&args.package).copied();
+    // Accept an exact `name@version` id, or a bare name that names one version.
+    let target_idx = match map.get(&args.package) {
+        Some(&idx) => Some(idx),
+        None => {
+            let mut matches: Vec<(String, NodeIndex)> = map
+                .iter()
+                .filter(|(_, &idx)| graph[idx].name == args.package)
+                .map(|(id, &idx)| (id.clone(), idx))
+                .collect();
+            matches.sort();
+            if matches.len() > 1 {
+                let ids: Vec<String> = matches.into_iter().map(|(id, _)| id).collect();
+                return Err(anyhow::anyhow!(
+                    "package '{}' has {} versions in the dependency graph ({}); pass one as name@version",
+                    args.package,
+                    ids.len(),
+                    ids.join(", ")
+                ));
+            }
+            matches.pop().map(|(_, idx)| idx)
+        }
+    };
     let Some(target_idx) = target_idx else {
         return Ok(BlastRadiusResult {
             target: args.package.clone(),

@@ -1,12 +1,12 @@
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
 use super::*;
-use crate::dep_graph::{build_dep_graph, DepNode, Ecosystem};
+use crate::dep_graph::{build_dep_graph, dep_id, DepNode, Ecosystem};
 
 type ParseResult = Result<(Vec<DepNode>, Vec<(String, String)>)>;
 
@@ -170,7 +170,7 @@ pub(crate) fn run_polyglot(args: &PolyglotArgs) -> Result<()> {
 #[derive(Deserialize)]
 struct NpmLockV3 {
     #[serde(default)]
-    packages: HashMap<String, NpmPackageEntry>,
+    packages: BTreeMap<String, NpmPackageEntry>,
 }
 
 #[derive(Deserialize)]
@@ -191,49 +191,79 @@ pub(crate) fn parse_npm_lock(path: &Path) -> ParseResult {
     let lock: NpmLockV3 =
         serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
 
+    // Keys are like "node_modules/express" or "node_modules/a/node_modules/b".
+    // The package name is the part after the last "node_modules/".
+    let npm_name = |key: &str| -> String {
+        match key.rfind("node_modules/") {
+            Some(pos) => key[pos + "node_modules/".len()..].to_string(),
+            None => key.to_string(),
+        }
+    };
+
     let mut packages = Vec::new();
     let mut edges = Vec::new();
-    let mut seen_names: HashMap<String, bool> = HashMap::new();
 
     for (key, entry) in &lock.packages {
-        // Keys are like "node_modules/express" or "node_modules/a/node_modules/b".
-        // Extract the package name: last segment after "node_modules/".
-        let name = if key.is_empty() {
+        if key.is_empty() {
             // Root project entry.
             continue;
-        } else if let Some(pos) = key.rfind("node_modules/") {
-            &key[pos + "node_modules/".len()..]
-        } else {
-            key.as_str()
-        };
-
-        if !seen_names.contains_key(name) {
-            seen_names.insert(name.to_string(), true);
-            packages.push(DepNode {
-                name: name.to_string(),
-                version: entry.version.clone(),
-                ecosystem: Ecosystem::Js,
-            });
         }
+        let node = DepNode {
+            name: npm_name(key),
+            version: entry.version.clone(),
+            ecosystem: Ecosystem::Js,
+        };
+        let from = node.id();
+        packages.push(node);
 
         for dep_name in entry.dependencies.keys() {
-            edges.push((name.to_string(), dep_name.clone()));
-        }
-    }
-
-    // Ensure all edge targets exist as nodes (some transitive deps may only appear as targets).
-    for (_, to) in &edges {
-        if !seen_names.contains_key(to) {
-            seen_names.insert(to.clone(), true);
-            packages.push(DepNode {
-                name: to.clone(),
-                version: None,
-                ecosystem: Ecosystem::Js,
-            });
+            let to = match resolve_npm_dep(&lock.packages, key, dep_name) {
+                Some(dep_key) => dep_id(
+                    &npm_name(dep_key),
+                    lock.packages[dep_key].version.as_deref(),
+                ),
+                None => {
+                    // Not installed (e.g. an unmet optional or peer dependency).
+                    packages.push(DepNode {
+                        name: dep_name.clone(),
+                        version: None,
+                        ecosystem: Ecosystem::Js,
+                    });
+                    dep_name.clone()
+                }
+            };
+            edges.push((from.clone(), to));
         }
     }
 
     Ok((packages, edges))
+}
+
+/// Resolve `dep` the way Node does from the package installed at `from_key`:
+/// the nearest `node_modules/<dep>` walking up from `from_key` to the root.
+fn resolve_npm_dep<'a>(
+    packages: &'a BTreeMap<String, NpmPackageEntry>,
+    from_key: &str,
+    dep: &str,
+) -> Option<&'a str> {
+    let mut base = from_key;
+    loop {
+        let candidate = if base.is_empty() {
+            format!("node_modules/{dep}")
+        } else {
+            format!("{base}/node_modules/{dep}")
+        };
+        if let Some((key, _)) = packages.get_key_value(&candidate) {
+            return Some(key.as_str());
+        }
+        if base.is_empty() {
+            return None;
+        }
+        base = base
+            .rsplit_once('/')
+            .map(|(parent, _)| parent)
+            .unwrap_or("");
+    }
 }
 
 /// Try lock file first, fall back to package.json (direct deps only).
@@ -274,23 +304,26 @@ fn parse_npm_package_json(path: &Path) -> ParseResult {
     let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("root");
     let version = v.get("version").and_then(|n| n.as_str());
 
-    let mut packages = vec![DepNode {
+    let root = DepNode {
         name: name.to_string(),
         version: version.map(|s| s.to_string()),
         ecosystem: Ecosystem::Js,
-    }];
+    };
+    let root_id = root.id();
+    let mut packages = vec![root];
     let mut edges = Vec::new();
 
     for key in ["dependencies", "devDependencies"] {
         if let Some(deps) = v.get(key).and_then(|d| d.as_object()) {
             for (dep_name, ver_range) in deps {
                 let ver = ver_range.as_str().map(|s| s.to_string());
-                packages.push(DepNode {
+                let dep = DepNode {
                     name: dep_name.clone(),
                     version: ver,
                     ecosystem: Ecosystem::Js,
-                });
-                edges.push((name.to_string(), dep_name.clone()));
+                };
+                edges.push((root_id.clone(), dep.id()));
+                packages.push(dep);
             }
         }
     }
@@ -320,6 +353,9 @@ struct UvPackage {
 #[derive(Deserialize)]
 struct UvDep {
     name: String,
+    /// Present when the lock holds more than one version of `name`.
+    #[serde(default)]
+    version: Option<String>,
 }
 
 pub(crate) fn parse_uv_lock(path: &Path) -> ParseResult {
@@ -333,32 +369,42 @@ pub(crate) fn parse_uv_lock(path: &Path) -> ParseResult {
     let lock: UvLock =
         toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
 
-    let mut packages = Vec::new();
-    let mut edges = Vec::new();
-    let mut seen: HashMap<String, bool> = HashMap::new();
-
+    // Versions locked per name, to resolve dependencies that omit a version
+    // (uv only writes one when the name is ambiguous).
+    let mut versions: HashMap<&str, Vec<Option<&str>>> = HashMap::new();
     for pkg in &lock.packages {
-        if !seen.contains_key(&pkg.name) {
-            seen.insert(pkg.name.clone(), true);
-            packages.push(DepNode {
-                name: pkg.name.clone(),
-                version: pkg.version.clone(),
-                ecosystem: Ecosystem::Python,
-            });
-        }
-        for dep in &pkg.dependencies {
-            edges.push((pkg.name.clone(), dep.name.clone()));
-        }
+        versions
+            .entry(pkg.name.as_str())
+            .or_default()
+            .push(pkg.version.as_deref());
     }
 
-    for (_, to) in &edges {
-        if !seen.contains_key(to) {
-            seen.insert(to.clone(), true);
-            packages.push(DepNode {
-                name: to.clone(),
-                version: None,
-                ecosystem: Ecosystem::Python,
-            });
+    let mut packages = Vec::new();
+    let mut edges = Vec::new();
+
+    for pkg in &lock.packages {
+        let node = DepNode {
+            name: pkg.name.clone(),
+            version: pkg.version.clone(),
+            ecosystem: Ecosystem::Python,
+        };
+        let from = node.id();
+        packages.push(node);
+        for dep in &pkg.dependencies {
+            let version = match (&dep.version, versions.get(dep.name.as_str())) {
+                (Some(v), _) => Some(v.as_str()),
+                (None, Some(vs)) if vs.len() == 1 => vs[0],
+                _ => None,
+            };
+            let to = dep_id(&dep.name, version);
+            if !versions.contains_key(dep.name.as_str()) || version.is_none() {
+                packages.push(DepNode {
+                    name: dep.name.clone(),
+                    version: version.map(str::to_string),
+                    ecosystem: Ecosystem::Python,
+                });
+            }
+            edges.push((from.clone(), to));
         }
     }
 
@@ -410,11 +456,13 @@ fn parse_pyproject_toml(path: &Path) -> ParseResult {
         .and_then(|p| p.get("version"))
         .and_then(|n| n.as_str());
 
-    let mut packages = vec![DepNode {
+    let root = DepNode {
         name: project_name.to_string(),
         version: project_version.map(|s| s.to_string()),
         ecosystem: Ecosystem::Python,
-    }];
+    };
+    let root_id = root.id();
+    let mut packages = vec![root];
     let mut edges = Vec::new();
 
     // [project.dependencies] is an array of PEP 508 strings like "requests>=2.0"
@@ -438,7 +486,7 @@ fn parse_pyproject_toml(path: &Path) -> ParseResult {
                         version: None,
                         ecosystem: Ecosystem::Python,
                     });
-                    edges.push((project_name.to_string(), name));
+                    edges.push((root_id.clone(), name));
                 }
             }
         }
@@ -478,7 +526,7 @@ pub(crate) fn parse_go_mod_graph(path: &Path) -> ParseResult {
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?
     };
 
-    let mut seen: HashMap<String, Option<String>> = HashMap::new();
+    let mut seen: BTreeMap<String, DepNode> = BTreeMap::new();
     let mut edges = Vec::new();
 
     for line in output.lines() {
@@ -490,24 +538,21 @@ pub(crate) fn parse_go_mod_graph(path: &Path) -> ParseResult {
             continue;
         };
 
-        let (from_name, from_ver) = split_go_module(from_raw);
-        let (to_name, to_ver) = split_go_module(to_raw);
-
-        seen.entry(from_name.clone())
-            .or_insert_with(|| from_ver.clone());
-        seen.entry(to_name.clone())
-            .or_insert_with(|| to_ver.clone());
-        edges.push((from_name, to_name));
+        // `module@version` is the full identity; distinct versions stay distinct.
+        for raw in [from_raw, to_raw] {
+            seen.entry(raw.to_string()).or_insert_with(|| {
+                let (name, version) = split_go_module(raw);
+                DepNode {
+                    name,
+                    version,
+                    ecosystem: Ecosystem::Go,
+                }
+            });
+        }
+        edges.push((from_raw.to_string(), to_raw.to_string()));
     }
 
-    let packages: Vec<DepNode> = seen
-        .into_iter()
-        .map(|(name, version)| DepNode {
-            name,
-            version,
-            ecosystem: Ecosystem::Go,
-        })
-        .collect();
+    let packages: Vec<DepNode> = seen.into_values().collect();
 
     Ok((packages, edges))
 }
@@ -516,5 +561,220 @@ fn split_go_module(s: &str) -> (String, Option<String>) {
     match s.split_once('@') {
         Some((name, ver)) => (name.to_string(), Some(ver.to_string())),
         None => (s.to_string(), None),
+    }
+}
+
+#[cfg(test)]
+mod lockfile_identity_tests {
+    //! Distinct versions of one package are distinct nodes, and each edge
+    //! points at the version the dependent actually resolves to.
+
+    use super::*;
+    use std::collections::BTreeSet;
+
+    type Ver = Option<String>;
+    type Nodes = BTreeSet<(String, Ver)>;
+    type Edges = BTreeSet<(String, Ver, String, Ver)>;
+
+    fn graph_shape((packages, edges): (Vec<DepNode>, Vec<(String, String)>)) -> (Nodes, Edges) {
+        let (graph, _) = build_dep_graph(&packages, &edges);
+        let nodes = graph
+            .node_weights()
+            .map(|n| (n.name.clone(), n.version.clone()))
+            .collect();
+        let edges = graph
+            .edge_indices()
+            .map(|e| {
+                let (a, b) = graph.edge_endpoints(e).unwrap();
+                let (a, b) = (&graph[a], &graph[b]);
+                (
+                    a.name.clone(),
+                    a.version.clone(),
+                    b.name.clone(),
+                    b.version.clone(),
+                )
+            })
+            .collect();
+        (nodes, edges)
+    }
+
+    fn v(s: &str) -> Ver {
+        Some(s.to_string())
+    }
+
+    fn write(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    #[test]
+    fn npm_lock_keeps_nested_versions_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = write(
+            dir.path(),
+            "package-lock.json",
+            r#"{"lockfileVersion": 3, "packages": {
+                "": {"name": "root", "dependencies": {"a": "^1", "b": "^2"}},
+                "node_modules/a": {"version": "1.0.0", "dependencies": {"b": "^1"}},
+                "node_modules/a/node_modules/b": {"version": "1.0.0"},
+                "node_modules/b": {"version": "2.0.0"},
+                "node_modules/c": {"version": "1.0.0", "dependencies": {"b": "^2"}}
+            }}"#,
+        );
+        let (nodes, edges) = graph_shape(parse_npm_lock(&lock).unwrap());
+        assert_eq!(
+            nodes,
+            BTreeSet::from([
+                ("a".into(), v("1.0.0")),
+                ("b".into(), v("1.0.0")),
+                ("b".into(), v("2.0.0")),
+                ("c".into(), v("1.0.0")),
+            ])
+        );
+        assert_eq!(
+            edges,
+            BTreeSet::from([
+                ("a".into(), v("1.0.0"), "b".into(), v("1.0.0")),
+                ("c".into(), v("1.0.0"), "b".into(), v("2.0.0")),
+            ])
+        );
+    }
+
+    #[test]
+    fn uv_lock_keeps_forked_versions_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = write(
+            dir.path(),
+            "uv.lock",
+            r#"version = 1
+
+[[package]]
+name = "app"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
+    { name = "numpy", version = "2.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+    { name = "pandas" },
+]
+
+[[package]]
+name = "numpy"
+version = "1.26.4"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "numpy"
+version = "2.1.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "pandas"
+version = "2.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", version = "2.1.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "tzdata" },
+]
+
+[[package]]
+name = "tzdata"
+version = "2024.1"
+source = { registry = "https://pypi.org/simple" }
+"#,
+        );
+        let (nodes, edges) = graph_shape(parse_uv_lock(&lock).unwrap());
+        assert_eq!(
+            nodes,
+            BTreeSet::from([
+                ("app".into(), v("0.1.0")),
+                ("numpy".into(), v("1.26.4")),
+                ("numpy".into(), v("2.1.0")),
+                ("pandas".into(), v("2.2.0")),
+                ("tzdata".into(), v("2024.1")),
+            ])
+        );
+        assert_eq!(
+            edges,
+            BTreeSet::from([
+                ("app".into(), v("0.1.0"), "numpy".into(), v("1.26.4")),
+                ("app".into(), v("0.1.0"), "numpy".into(), v("2.1.0")),
+                ("app".into(), v("0.1.0"), "pandas".into(), v("2.2.0")),
+                ("pandas".into(), v("2.2.0"), "numpy".into(), v("2.1.0")),
+                ("pandas".into(), v("2.2.0"), "tzdata".into(), v("2024.1")),
+            ])
+        );
+    }
+
+    #[test]
+    fn manifest_fallbacks_link_root_to_direct_deps() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = write(
+            dir.path(),
+            "package.json",
+            r#"{"name": "web", "version": "1.0.0", "dependencies": {"left-pad": "^1.3.0"}}"#,
+        );
+        let (_, edges) = graph_shape(parse_npm(&pkg).unwrap());
+        assert_eq!(
+            edges,
+            BTreeSet::from([("web".into(), v("1.0.0"), "left-pad".into(), v("^1.3.0"))])
+        );
+
+        let py = write(
+            dir.path(),
+            "pyproject.toml",
+            "[project]\nname = \"svc\"\nversion = \"0.2.0\"\ndependencies = [\"requests>=2\"]\n",
+        );
+        let (_, edges) = graph_shape(parse_python(&py).unwrap());
+        assert_eq!(
+            edges,
+            BTreeSet::from([("svc".into(), v("0.2.0"), "requests".into(), None)])
+        );
+    }
+
+    #[test]
+    fn go_mod_graph_keeps_module_versions_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = write(
+            dir.path(),
+            "graph.txt",
+            "example.com/app golang.org/x/text@v0.3.0\n\
+             example.com/app example.com/lib@v1.0.0\n\
+             example.com/lib@v1.0.0 golang.org/x/text@v0.1.0\n",
+        );
+        let (nodes, edges) = graph_shape(parse_go_mod_graph(&graph).unwrap());
+        assert_eq!(
+            nodes,
+            BTreeSet::from([
+                ("example.com/app".into(), None),
+                ("example.com/lib".into(), v("v1.0.0")),
+                ("golang.org/x/text".into(), v("v0.1.0")),
+                ("golang.org/x/text".into(), v("v0.3.0")),
+            ])
+        );
+        assert_eq!(
+            edges,
+            BTreeSet::from([
+                (
+                    "example.com/app".into(),
+                    None,
+                    "example.com/lib".into(),
+                    v("v1.0.0")
+                ),
+                (
+                    "example.com/app".into(),
+                    None,
+                    "golang.org/x/text".into(),
+                    v("v0.3.0")
+                ),
+                (
+                    "example.com/lib".into(),
+                    v("v1.0.0"),
+                    "golang.org/x/text".into(),
+                    v("v0.1.0")
+                ),
+            ])
+        );
     }
 }

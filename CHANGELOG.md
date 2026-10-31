@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `files` on a remote URL refreshes an earlier clone of that URL to the remote's current HEAD (`git fetch` + `reset --hard`) instead of reusing it unchanged, so repeat runs no longer analyze a stale checkout. The analyzed commit is reported as `source_commit` in JSON output and `commit=` in the text header.
+- A `.pkgrank.toml` that cannot be read or parsed, or that names an invalid layer glob, now fails `files` with an error naming the file (and the glob). It was previously ignored, which silently disabled rule enforcement, including under `--fail-on-violation`.
+
+### Changed
+
+- `polyglot` and `blast-radius` key npm (`package-lock.json`), uv (`uv.lock`) and Go (`go mod graph`) packages by name and version, as the Cargo graph does by package id. Two versions of one package are now two rows, and each edge points at the version the dependent resolves to (npm: nearest `node_modules`; uv: the dependency's locked version). They were previously merged into one node under the first-seen version. `blast-radius` accepts `name@version`; a bare name that matches several versions is an error listing them.
+
 ## [0.5.2] - 2026-10-30
 
 ### Fixed

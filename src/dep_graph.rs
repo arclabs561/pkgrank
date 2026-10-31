@@ -32,11 +32,27 @@ pub(crate) struct DepNode {
     pub ecosystem: Ecosystem,
 }
 
+impl DepNode {
+    /// Graph identity: `name@version`, or `name` when the version is unknown.
+    /// Two versions of one package are two nodes, as with Cargo `PackageId`s.
+    pub(crate) fn id(&self) -> String {
+        dep_id(&self.name, self.version.as_deref())
+    }
+}
+
+pub(crate) fn dep_id(name: &str, version: Option<&str>) -> String {
+    match version {
+        Some(v) => format!("{name}@{v}"),
+        None => name.to_string(),
+    }
+}
+
 pub(crate) type DepGraph = DiGraph<DepNode, f64>;
 pub(crate) type DepNodeMap = HashMap<String, NodeIndex>;
 
 /// Build a generic dependency graph from a list of packages and edges.
-/// Edges are `(from_name, to_name)` where names match `DepNode.name`.
+/// Edges are `(from_id, to_id)` where ids match `DepNode::id`; packages with
+/// the same id are merged into one node.
 pub(crate) fn build_dep_graph(
     packages: &[DepNode],
     edges: &[(String, String)],
@@ -45,8 +61,8 @@ pub(crate) fn build_dep_graph(
     let mut map = DepNodeMap::new();
 
     for pkg in packages {
-        let idx = graph.add_node(pkg.clone());
-        map.insert(pkg.name.clone(), idx);
+        map.entry(pkg.id())
+            .or_insert_with(|| graph.add_node(pkg.clone()));
     }
 
     for (from, to) in edges {
