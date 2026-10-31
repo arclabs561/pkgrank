@@ -1338,6 +1338,17 @@ fn parse_python_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
         };
 
         let this_mod = file_to_mod.get(file).cloned().unwrap_or_default();
+        // Relative imports resolve against the containing package. A
+        // package's `__init__.py` is the package itself, so its package is
+        // its own module path; any other module's package is its parent.
+        let this_package = if file.file_name().is_some_and(|n| n == "__init__.py") {
+            this_mod.clone()
+        } else {
+            this_mod
+                .rsplit_once('.')
+                .map(|(p, _)| p.to_string())
+                .unwrap_or_default()
+        };
 
         // Join multi-line imports: `from pkg import (\n  A,\n  B\n)`
         let logical_lines = join_paren_lines(&content);
@@ -1346,7 +1357,7 @@ fn parse_python_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
             let line = line.trim();
 
             if let Some(targets) =
-                parse_python_from_import(line, &this_mod, &pkg_name, &mod_to_file)
+                parse_python_from_import(line, &this_package, &pkg_name, &mod_to_file)
             {
                 for target in targets {
                     if target != *file {
@@ -1489,7 +1500,7 @@ fn python_file_to_mod_path(file: &Path, pkg_dir: &Path, pkg_name: &str) -> Optio
 
 fn parse_python_from_import(
     line: &str,
-    current_mod: &str,
+    current_package: &str,
     pkg_name: &str,
     mod_to_file: &HashMap<String, PathBuf>,
 ) -> Option<Vec<PathBuf>> {
@@ -1503,9 +1514,10 @@ fn parse_python_from_import(
         let dots = module_part.chars().take_while(|c| *c == '.').count();
         let relative = &module_part[dots..];
 
-        // Go up `dots` levels from current module.
-        let mut base = current_mod.to_string();
-        for _ in 0..dots {
+        // One dot names the current package; each further dot goes up one
+        // package level.
+        let mut base = current_package.to_string();
+        for _ in 1..dots {
             base = base
                 .rsplit_once('.')
                 .map(|(p, _)| p.to_string())
@@ -3922,6 +3934,38 @@ mod import_parser_tests {
             );
         }
         assert!(!got.iter().any(|(from, _)| from == "pkg/c.py"), "{got:?}");
+    }
+
+    // In a package's __init__.py, `from .core import f` names pkg.core: the
+    // __init__ module *is* the package, so one dot means the package itself.
+    #[test]
+    fn python_relative_import_in_top_level_init() {
+        let (dir, paths) = project(&[
+            ("pkg/__init__.py", "from .core import f\n"),
+            ("pkg/core.py", "def f(): pass\n"),
+        ]);
+        let edges = parse_python_imports(dir.path(), &sources(&paths, &["py"]));
+        let got = edge_set(dir.path(), &edges);
+        assert!(
+            got.contains(&("pkg/__init__.py".into(), "pkg/core.py".into())),
+            "missing __init__ -> core edge; got {got:?}"
+        );
+    }
+
+    #[test]
+    fn python_relative_import_in_subpackage_init() {
+        let (dir, paths) = project(&[
+            ("pkg/__init__.py", ""),
+            ("pkg/helpers.py", ""),
+            ("pkg/sub/__init__.py", "from .helpers import g\n"),
+            ("pkg/sub/helpers.py", "def g(): pass\n"),
+        ]);
+        let edges = parse_python_imports(dir.path(), &sources(&paths, &["py"]));
+        assert_eq!(
+            edge_set(dir.path(), &edges),
+            set(&[("pkg/sub/__init__.py", "pkg/sub/helpers.py")]),
+            "relative import resolved one package too high"
+        );
     }
 
     #[test]
