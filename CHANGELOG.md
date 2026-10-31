@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-30
+
 ### Fixed
 
 - Python relative imports in a package's `__init__.py` resolve against that package: `from .core import f` in `pkg/__init__.py` now links to `pkg/core.py`. They previously resolved one package level too high, so the edge was dropped or pointed at a sibling of the package.
