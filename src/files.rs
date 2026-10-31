@@ -2827,8 +2827,28 @@ fn detect_ffi_seams(root: &Path, files: &[PathBuf], ecosystems: &[Ecosystem]) ->
 
 /// Clone `url` into a per-URL temp dir, or bring an earlier clone up to the
 /// remote's current HEAD so a repeat analysis never reads a stale checkout.
+/// Directory a remote URL is cloned into; stable per URL so repeat runs reuse it.
+fn clone_dir(url: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("pkgrank-{:016x}", fnv1a64(url.as_bytes())))
+}
+
+/// Directory whose `.pkgrank.toml` applies to `path`: the clone for a URL,
+/// the parent of a file, or the directory itself.
+fn rules_dir(path: &str) -> PathBuf {
+    let uri = expand_uri(path);
+    if is_url(&uri) {
+        return clone_dir(&uri);
+    }
+    let p = PathBuf::from(&uri);
+    if p.is_file() {
+        p.parent().unwrap_or(Path::new(".")).to_path_buf()
+    } else {
+        p
+    }
+}
+
 fn clone_repo_to_temp(url: &str) -> Result<PathBuf> {
-    let tmp = std::env::temp_dir().join(format!("pkgrank-{:016x}", fnv1a64(url.as_bytes())));
+    let tmp = clone_dir(url);
     if tmp.join(".git").exists() {
         eprintln!("refreshing {} in {}", url, tmp.display());
         run_git(&tmp, &["fetch", "--depth", "1", "origin", "HEAD"])?;
@@ -3426,16 +3446,7 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
     match fmt {
         OutputFormat::Json => {
             let layer_violations = compute_layer_violations(&result);
-            let project_dir = if is_url(&args.path) {
-                PathBuf::from(".")
-            } else {
-                let p = PathBuf::from(&args.path);
-                if p.is_file() {
-                    p.parent().unwrap_or(Path::new(".")).to_path_buf()
-                } else {
-                    p
-                }
-            };
+            let project_dir = rules_dir(&args.path);
             let arch_rules = load_arch_rules(&project_dir)?;
             let rule_violations = arch_rules
                 .as_ref()
@@ -3752,16 +3763,7 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
     }
 
     // Check user-defined architectural rules (.pkgrank.toml).
-    let project_dir = if is_url(&args.path) {
-        PathBuf::from(".")
-    } else {
-        let p = PathBuf::from(&args.path);
-        if p.is_file() {
-            p.parent().unwrap_or(Path::new(".")).to_path_buf()
-        } else {
-            p
-        }
-    };
+    let project_dir = rules_dir(&args.path);
     let arch_rules = load_arch_rules(&project_dir)?;
     let rule_violations = if let Some(ref rules) = arch_rules {
         let v = check_arch_rules(rules, &result.direct_edges);
@@ -4090,6 +4092,13 @@ mod remote_clone_tests {
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn rules_for_a_url_come_from_its_clone_not_the_current_directory() {
+        let url = "https://github.com/example/project";
+        assert_eq!(rules_dir(url), clone_dir(url));
+        assert_ne!(rules_dir(url), PathBuf::from("."));
     }
 
     #[test]
