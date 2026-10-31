@@ -5,6 +5,7 @@
 ### Fixed
 
 - `files` on a remote URL refreshes an earlier clone of that URL to the remote's current HEAD (`git fetch` + `reset --hard`) instead of reusing it unchanged, so repeat runs no longer analyze a stale checkout. The analyzed commit is reported as `source_commit` in JSON output and `commit=` in the text header.
+- `files` on a remote URL reads `.pkgrank.toml` from the clone. It read the current directory's file instead, so a URL target was checked against unrelated rules or none.
 - A `.pkgrank.toml` that cannot be read or parsed, or that names an invalid layer glob, now fails `files` with an error naming the file (and the glob). It was previously ignored, which silently disabled rule enforcement, including under `--fail-on-violation`.
 
 ### Changed
