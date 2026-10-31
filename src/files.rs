@@ -2304,6 +2304,9 @@ pub(crate) struct FilesResult {
     pub cycles: Vec<Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub direct_edges: Vec<(String, String)>,
+    /// Commit SHA analyzed when the target was a remote URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2447,11 +2450,32 @@ pub(crate) struct RuleViolation {
     pub file_to: String,
 }
 
-/// Load `.pkgrank.toml` from a directory. Returns None if not found.
-pub(crate) fn load_arch_rules(dir: &Path) -> Option<ArchRules> {
+/// Load `.pkgrank.toml` from a directory. Returns `Ok(None)` if the file does
+/// not exist. A file that cannot be read or parsed, or that names an invalid
+/// layer glob, is an error: ignoring it would silently disable enforcement.
+pub(crate) fn load_arch_rules(dir: &Path) -> Result<Option<ArchRules>> {
     let path = dir.join(".pkgrank.toml");
-    let raw = std::fs::read_to_string(&path).ok()?;
-    toml::from_str(&raw).ok()
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(anyhow::anyhow!("failed to read {}: {}", path.display(), e)),
+    };
+    let rules: ArchRules =
+        toml::from_str(&raw).map_err(|e| anyhow::anyhow!("invalid {}: {}", path.display(), e))?;
+    for (layer, patterns) in &rules.layers {
+        for p in patterns {
+            glob::Pattern::new(p).map_err(|e| {
+                anyhow::anyhow!(
+                    "invalid {}: layer `{}` glob `{}`: {}",
+                    path.display(),
+                    layer,
+                    p,
+                    e
+                )
+            })?;
+        }
+    }
+    Ok(Some(rules))
 }
 
 /// Check edges against user-defined architectural rules.
@@ -2801,10 +2825,14 @@ fn detect_ffi_seams(root: &Path, files: &[PathBuf], ecosystems: &[Ecosystem]) ->
     edges
 }
 
+/// Clone `url` into a per-URL temp dir, or bring an earlier clone up to the
+/// remote's current HEAD so a repeat analysis never reads a stale checkout.
 fn clone_repo_to_temp(url: &str) -> Result<PathBuf> {
     let tmp = std::env::temp_dir().join(format!("pkgrank-{:016x}", fnv1a64(url.as_bytes())));
-    if tmp.exists() {
-        // Reuse existing clone.
+    if tmp.join(".git").exists() {
+        eprintln!("refreshing {} in {}", url, tmp.display());
+        run_git(&tmp, &["fetch", "--depth", "1", "origin", "HEAD"])?;
+        run_git(&tmp, &["reset", "--hard", "FETCH_HEAD"])?;
         return Ok(tmp);
     }
     eprintln!("cloning {} → {}", url, tmp.display());
@@ -2819,6 +2847,26 @@ fn clone_repo_to_temp(url: &str) -> Result<PathBuf> {
         return Err(anyhow::anyhow!("git clone failed: {}", stderr.trim()));
     }
     Ok(tmp)
+}
+
+/// Run a git subcommand in `dir`, returning trimmed stdout.
+fn run_git(dir: &Path, args: &[&str]) -> Result<String> {
+    let out = ProcessCommand::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env_remove("GITHUB_TOKEN")
+        .output()
+        .map_err(|e| anyhow::anyhow!("git {} failed: {}", args.join(" "), e))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(anyhow::anyhow!(
+            "git {} in {} failed: {}",
+            args.join(" "),
+            dir.display(),
+            stderr.trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 fn is_url(s: &str) -> bool {
@@ -2920,8 +2968,11 @@ fn files_cache_write(cache_dir: &Path, key: u64, result: &FilesResult) {
 
 pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
     let uri = expand_uri(&args.path);
+    let mut source_commit = None;
     let root = if is_url(&uri) {
-        clone_repo_to_temp(&uri)?
+        let dir = clone_repo_to_temp(&uri)?;
+        source_commit = Some(run_git(&dir, &["rev-parse", "HEAD"])?);
+        dir
     } else {
         let p = PathBuf::from(&uri);
         if p.is_file() {
@@ -2958,7 +3009,8 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
     let cache_dir = root.join("evals/pkgrank/files_cache");
     if args.cache {
         let key = files_cache_key(&all_files, args);
-        if let Some(cached) = files_cache_read(&cache_dir, key) {
+        if let Some(mut cached) = files_cache_read(&cache_dir, key) {
+            cached.source_commit = source_commit;
             return Ok(cached);
         }
     }
@@ -3351,6 +3403,7 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
         cycles,
         rows,
         direct_edges: av.direct_edges,
+        source_commit,
     };
 
     // Cache write.
@@ -3383,7 +3436,7 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                     p
                 }
             };
-            let arch_rules = load_arch_rules(&project_dir);
+            let arch_rules = load_arch_rules(&project_dir)?;
             let rule_violations = arch_rules
                 .as_ref()
                 .map(|r| check_arch_rules(r, &result.direct_edges))
@@ -3395,6 +3448,8 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                 ok: bool,
                 command: &'static str,
                 ecosystem: Ecosystem,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                source_commit: Option<String>,
                 nodes: usize,
                 edges: usize,
                 orphan_count: usize,
@@ -3415,6 +3470,7 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                 ok: true,
                 command: "files",
                 ecosystem: result.ecosystem,
+                source_commit: result.source_commit.clone(),
                 nodes: result.nodes,
                 edges: result.edges,
                 orphan_count: result.orphan_count,
@@ -3436,9 +3492,13 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
             } else {
                 String::new()
             };
+            let commit_label = match &result.source_commit {
+                Some(sha) => format!("  commit={}", sha),
+                None => String::new(),
+            };
             println!(
-                "pkgrank files  ecosystem={}  metric={:?}  include_tests={}{}\n",
-                result.ecosystem, args.metric, args.include_tests, git_label
+                "pkgrank files  ecosystem={}  metric={:?}  include_tests={}{}{}\n",
+                result.ecosystem, args.metric, args.include_tests, git_label, commit_label
             );
             if args.git {
                 println!(
@@ -3702,7 +3762,7 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
             p
         }
     };
-    let arch_rules = load_arch_rules(&project_dir);
+    let arch_rules = load_arch_rules(&project_dir)?;
     let rule_violations = if let Some(ref rules) = arch_rules {
         let v = check_arch_rules(rules, &result.direct_edges);
         if !v.is_empty() {
@@ -4002,5 +4062,62 @@ mod import_parser_tests {
             edge_set(dir.path(), &edges),
             set(&[("main.go", "util/u.go")])
         );
+    }
+}
+
+#[cfg(test)]
+mod remote_clone_tests {
+    use super::*;
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = ProcessCommand::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn reused_clone_is_refreshed_to_remote_head() {
+        let origin = tempfile::tempdir().unwrap();
+        git(origin.path(), &["init", "-q"]);
+        std::fs::write(origin.path().join("a.txt"), "one\n").unwrap();
+        git(origin.path(), &["add", "."]);
+        git(origin.path(), &["commit", "-q", "-m", "one"]);
+        let url = origin.path().to_string_lossy().to_string();
+
+        let first = clone_repo_to_temp(&url).unwrap();
+        let first_head = git(&first, &["rev-parse", "HEAD"]);
+
+        std::fs::write(origin.path().join("a.txt"), "two\n").unwrap();
+        git(origin.path(), &["commit", "-q", "-am", "two"]);
+        let new_head = git(origin.path(), &["rev-parse", "HEAD"]);
+        assert_ne!(first_head, new_head);
+
+        // A second analysis of the same URL must see the new commit, not the
+        // clone left behind by the first run.
+        let second = clone_repo_to_temp(&url).unwrap();
+        assert_eq!(second, first);
+        assert_eq!(git(&second, &["rev-parse", "HEAD"]), new_head);
+        assert_eq!(
+            std::fs::read_to_string(second.join("a.txt")).unwrap(),
+            "two\n"
+        );
+        let _ = std::fs::remove_dir_all(&second);
     }
 }
