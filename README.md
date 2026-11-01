@@ -98,19 +98,12 @@ More commands and configuration are documented in
 
 TTY output is text. Piped output is JSON unless `--format text` is set.
 
-The JSON wrapper is stable:
-
-```json
-{
-  "schema_version": 1,
-  "ok": true,
-  "command": "files",
-  "rows": []
-}
-```
+Every JSON result carries the same stable wrapper fields: `schema_version`,
+`ok`, `command`, and `rows`.
 
 `pkgrank files` also reports cycle counts, orphan counts, layer violations, and
-rule violations.
+rule violations. By default it stores each run in a local SQLite database for
+`pkgrank query`; pass `--store false` to skip that.
 
 ## Limits
 
