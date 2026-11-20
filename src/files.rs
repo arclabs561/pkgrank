@@ -1254,12 +1254,34 @@ fn parse_use_statement(
 }
 
 fn resolve_use_path(path: &str, mod_to_file: &HashMap<String, PathBuf>, out: &mut Vec<PathBuf>) {
-    // Handle grouped imports: `crate::foo::{bar, baz}`
+    // Handle grouped imports: `crate::foo::{bar, baz}`. Groups nest
+    // (`crate::{a::{b, c}, d}`), so items are split only at commas outside
+    // inner braces and the group ends at its matching `}`; each item is then
+    // resolved recursively.
     if let Some(brace_start) = path.find('{') {
         let prefix = &path[..brace_start];
-        let rest = &path[brace_start + 1..];
-        let rest = rest.trim_end_matches('}');
-        for item in rest.split(',') {
+        let body = &path[brace_start + 1..];
+        let mut depth = 0usize;
+        let mut item_start = 0usize;
+        let mut end = body.len();
+        let mut items: Vec<&str> = Vec::new();
+        for (i, c) in body.char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' if depth == 0 => {
+                    end = i;
+                    break;
+                }
+                '}' => depth -= 1,
+                ',' if depth == 0 => {
+                    items.push(&body[item_start..i]);
+                    item_start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        items.push(&body[item_start..end]);
+        for item in items {
             let item = item.trim();
             if item.is_empty() {
                 continue;
@@ -1269,6 +1291,9 @@ fn resolve_use_path(path: &str, mod_to_file: &HashMap<String, PathBuf>, out: &mu
         }
         return;
     }
+
+    // `use a::b as c`: the alias is not part of the path.
+    let path = path.split(" as ").next().unwrap_or(path).trim();
 
     // Try progressively shorter prefixes to find the owning module's file.
     let mut path_str = path.to_string();
@@ -3973,6 +3998,41 @@ mod import_parser_tests {
                 ("src/a.rs", "src/c.rs"),
             ])
         );
+    }
+
+    // Nested groups: `crate::{b::{x, y}, c}` names b::x, b::y and c. Splitting
+    // the whole body on commas produced `crate::y}`, which fell back to the
+    // crate root (an edge to lib.rs) and lost the edge to b/y.rs.
+    #[test]
+    fn rust_nested_use_groups() {
+        let (dir, paths) = project(&[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+            ),
+            ("src/lib.rs", "mod a;\nmod b;\nmod c;\nmod d;\n"),
+            (
+                "src/a.rs",
+                "use crate::{b::{x::X, y::{self, Y}}, c::Other};\nuse crate::d as dee;\n",
+            ),
+            ("src/b.rs", "pub mod x;\npub mod y;\n"),
+            ("src/b/x.rs", "pub struct X;\n"),
+            ("src/b/y.rs", "pub struct Y;\n"),
+            ("src/c.rs", "pub struct Other;\n"),
+            ("src/d.rs", "pub struct D;\n"),
+        ]);
+        let edges = parse_rust_imports(dir.path(), &sources(&paths, &["rs"]));
+        let got = edge_set(dir.path(), &edges);
+        let from_a: HashSet<String> = got
+            .iter()
+            .filter(|(from, _)| from == "src/a.rs")
+            .map(|(_, to)| to.clone())
+            .collect();
+        let want: HashSet<String> = ["src/b/x.rs", "src/b/y.rs", "src/c.rs", "src/d.rs"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(from_a, want);
     }
 
     #[test]
