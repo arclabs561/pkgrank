@@ -1645,7 +1645,7 @@ fn parse_js_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
             std::borrow::Cow::Borrowed(&content)
         };
 
-        for line in effective_content.lines() {
+        for line in join_js_import_clauses(&effective_content) {
             let line = line.trim();
 
             for spec in extract_js_import_specifiers(line) {
@@ -1914,6 +1914,64 @@ fn extract_script_block_content(content: &str) -> String {
     } else {
         result
     }
+}
+
+/// True when `line` opens a braced import or export clause that does not
+/// close on the same line: `import {`, `import type {`, `import React, {`,
+/// `export {`, `export type {`. Declarations such as `export class Foo {` or
+/// `export const x = {` are not clauses and are left alone.
+fn opens_js_import_clause(line: &str) -> bool {
+    let Some(brace) = line.find('{') else {
+        return false;
+    };
+    if line[brace..].contains('}') {
+        return false;
+    }
+    let mut words = line[..brace].split_whitespace();
+    match words.next() {
+        Some("export") => {
+            let rest: Vec<&str> = words.collect();
+            rest.is_empty() || rest == ["type"]
+        }
+        Some("import") => {
+            // Optional `type`, then an optional default name ending in a comma.
+            let rest: Vec<&str> = words.filter(|w| *w != "type").collect();
+            match rest.as_slice() {
+                [] => true,
+                [name] => name.ends_with(','),
+                [name, ","] => !name.contains(','),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Lines of `content`, with an import or export clause that spans several
+/// lines joined into one, so `import {\n  a,\n  b,\n} from './x'` is seen
+/// whole. Formatters such as Prettier wrap long clauses this way.
+fn join_js_import_clauses(content: &str) -> Vec<String> {
+    // A clause longer than this is not an import list; stop joining.
+    const MAX_CLAUSE_LINES: usize = 200;
+    let mut out = Vec::new();
+    let mut lines = content.lines();
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim();
+        if !opens_js_import_clause(trimmed) {
+            out.push(line.to_string());
+            continue;
+        }
+        let mut joined = trimmed.to_string();
+        for (count, next) in lines.by_ref().enumerate() {
+            joined.push(' ');
+            joined.push_str(next.trim());
+            if next.contains('}') || count + 1 >= MAX_CLAUSE_LINES {
+                break;
+            }
+        }
+        out.push(joined);
+    }
+    out
 }
 
 fn extract_js_import_specifiers(line: &str) -> Vec<String> {
@@ -4088,6 +4146,60 @@ mod import_parser_tests {
             set(&[("pkg/sub/__init__.py", "pkg/sub/helpers.py")]),
             "relative import resolved one package too high"
         );
+    }
+
+    // Prettier wraps long import lists; the closing line `} from './x'` does
+    // not start with `import`, so a line-at-a-time parser saw no edge.
+    #[test]
+    fn js_multi_line_import_and_reexport_edges() {
+        let (dir, paths) = project(&[
+            ("package.json", "{\"name\": \"demo\"}\n"),
+            (
+                "src/a.ts",
+                "import {\n  one,\n  two,\n} from './b';\nimport type {\n  T,\n} from \"./c\";\nimport React, {\n  useState,\n} from './d';\nexport {\n  x,\n} from './e';\nexport class Foo {\n  note = \"copied from './f'\";\n}\nexport const table = {\n  k: \" from './f'\",\n};\n",
+            ),
+            ("src/b.ts", "export const one = 1; export const two = 2;\n"),
+            ("src/c.ts", "export type T = number;\n"),
+            ("src/d.ts", "export default {}; export const useState = 1;\n"),
+            ("src/e.ts", "export const x = 1;\n"),
+            ("src/f.ts", "export const unused = 1;\n"),
+        ]);
+        let edges = parse_js_imports(dir.path(), &sources(&paths, &["ts"]));
+        let got = edge_set(dir.path(), &edges);
+        let from_a: HashSet<String> = got
+            .iter()
+            .filter(|(from, _)| from == "src/a.ts")
+            .map(|(_, to)| to.clone())
+            .collect();
+        let want: HashSet<String> = ["src/b.ts", "src/c.ts", "src/d.ts", "src/e.ts"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(from_a, want);
+    }
+
+    #[test]
+    fn js_import_clause_detection() {
+        for yes in [
+            "import {",
+            "import type {",
+            "import React, {",
+            "import type React, {",
+            "export {",
+            "export type {",
+        ] {
+            assert!(opens_js_import_clause(yes), "{yes}");
+        }
+        for no in [
+            "import { a } from './x'",
+            "import x from './x'",
+            "export class Foo {",
+            "export const x = {",
+            "export default function f() {",
+            "if (x) {",
+        ] {
+            assert!(!opens_js_import_clause(no), "{no}");
+        }
     }
 
     #[test]
