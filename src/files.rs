@@ -77,11 +77,10 @@ pub(crate) struct FilesArgs {
     #[arg(long, default_value_t = false)]
     pub fail_on_violation: bool,
 
-    /// Show files transitively affected by changes to the given files.
+    /// List files that depend on the given paths through the static import graph.
     ///
-    /// Accepts comma-separated file paths (relative to project root).
-    /// Outputs all files that transitively depend on the changed files.
-    /// Useful for CI: only run tests for affected modules.
+    /// Pass comma-separated paths relative to the project root, or - to read one per line.
+    /// A listed test can still miss a change in behavior.
     #[arg(long, value_delimiter = ',')]
     pub affected: Option<Vec<String>>,
 }

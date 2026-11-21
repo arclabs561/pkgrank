@@ -46,6 +46,12 @@ For example:
 pkgrank files . --affected src/parser.rs | jq -r '.affected[]'
 ```
 
+A test in `.affected` has an import path to a changed file. Whether its
+assertions catch a bug is a separate question. In `durability`, changing
+`src/recordlog.rs` flagged all 38 existing integration test files. Their tests
+passed with the bug present. Four new regression cases failed on that revision
+and passed with the [torn-tail fix](https://github.com/arclabs561/durability/commit/4bdcdc54287fd69b99a4c027f0f9e4b31e3ee072).
+
 Rows include structural role, PageRank, consumer PageRank, betweenness,
 instability, blast radius, cycle membership, external dependencies, and optional
 git churn fields.
