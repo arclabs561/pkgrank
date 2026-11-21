@@ -3522,9 +3522,80 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
 // Run + print
 // ---------------------------------------------------------------------------
 
+#[derive(Serialize)]
+struct AffectedFiles {
+    changed: Vec<String>,
+    affected_count: usize,
+    affected: Vec<String>,
+}
+
+fn affected_files(args: &[String], result: &FilesResult) -> Result<AffectedFiles> {
+    let changed = if args.len() == 1 && args[0] == "-" {
+        use std::io::BufRead;
+        let mut paths = Vec::new();
+        for line in std::io::stdin().lock().lines() {
+            let line = line?;
+            if !line.trim().is_empty() {
+                paths.push(line.trim().to_owned());
+            }
+        }
+        paths
+    } else {
+        args.to_vec()
+    };
+    let affected = compute_affected(result, &changed);
+    Ok(AffectedFiles {
+        changed,
+        affected_count: affected.len(),
+        affected,
+    })
+}
+
+#[derive(Serialize)]
+struct FocusFile<'a> {
+    #[serde(flatten)]
+    row: &'a FileRow,
+    imports: Vec<&'a str>,
+    imported_by: Vec<&'a str>,
+}
+
+fn focus_files<'a>(query: &str, result: &'a FilesResult) -> Vec<FocusFile<'a>> {
+    result
+        .rows
+        .iter()
+        .filter(|r| r.file.contains(query))
+        .map(|row| {
+            let mut imports = Vec::new();
+            let mut imported_by = Vec::new();
+            for (from, to) in &result.direct_edges {
+                if from == &row.file {
+                    imports.push(to.as_str());
+                }
+                if to == &row.file {
+                    imported_by.push(from.as_str());
+                }
+            }
+            FocusFile {
+                row,
+                imports,
+                imported_by,
+            }
+        })
+        .collect()
+}
+
 pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
     let result = files_analyze(args)?;
 
+    let affected = args
+        .affected
+        .as_deref()
+        .map(|paths| affected_files(paths, &result))
+        .transpose()?;
+    let focus = args
+        .focus
+        .as_deref()
+        .map(|query| focus_files(query, &result));
     let fmt = effective_format(args.format);
     match fmt {
         OutputFormat::Json => {
@@ -3537,7 +3608,11 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                 .unwrap_or_default();
 
             #[derive(Serialize)]
-            struct Out {
+            struct Out<'a> {
+                #[serde(flatten)]
+                affected: Option<&'a AffectedFiles>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                focus: Option<&'a [FocusFile<'a>]>,
                 schema_version: u32,
                 ok: bool,
                 command: &'static str,
@@ -3560,6 +3635,8 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
             let rows_total = result.rows.len();
             let rows: Vec<FileRow> = result.rows.iter().take(args.top).cloned().collect();
             let out = Out {
+                affected: affected.as_ref(),
+                focus: focus.as_deref(),
                 schema_version: 1,
                 ok: true,
                 command: "files",
@@ -3791,55 +3868,21 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
         }
     }
 
-    // Focus mode: show detailed info about a specific file.
-    if let Some(focus) = &args.focus {
-        print_focus(focus, &result);
-    }
-
-    // Affected mode: show files transitively affected by changed files.
-    if let Some(changed) = &args.affected {
-        // If the only argument is "-", read file list from stdin (one per line).
-        let changed = if changed.len() == 1 && changed[0] == "-" {
-            use std::io::BufRead;
-            std::io::stdin()
-                .lock()
-                .lines()
-                .map_while(|l| l.ok())
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect()
-        } else {
-            changed.clone()
-        };
-        let affected = compute_affected(&result, &changed);
-        if affected.is_empty() {
-            eprintln!("no affected files found for: {}", changed.join(", "));
-        } else {
-            let fmt = effective_format(args.format);
-            match fmt {
-                OutputFormat::Json => {
-                    #[derive(Serialize)]
-                    struct AffectedOut {
-                        changed: Vec<String>,
-                        affected_count: usize,
-                        affected: Vec<String>,
-                    }
-                    let out = AffectedOut {
-                        changed: changed.clone(),
-                        affected_count: affected.len(),
-                        affected,
-                    };
-                    println!("{}", serde_json::to_string_pretty(&out)?);
-                }
-                OutputFormat::Text | OutputFormat::Auto => {
-                    println!(
-                        "\naffected by [{}] ({} files):",
-                        changed.join(", "),
-                        affected.len()
-                    );
-                    for f in &affected {
-                        println!("  {}", f);
-                    }
+    if fmt == OutputFormat::Text {
+        if let (Some(query), Some(matches)) = (&args.focus, &focus) {
+            print_focus(query, matches, &result);
+        }
+        if let Some(impact) = &affected {
+            if impact.affected.is_empty() {
+                eprintln!("no affected files found for: {}", impact.changed.join(", "));
+            } else {
+                println!(
+                    "\naffected by [{}] ({} files):",
+                    impact.changed.join(", "),
+                    impact.affected_count
+                );
+                for file in &impact.affected {
+                    println!("  {}", file);
                 }
             }
         }
@@ -3901,20 +3944,14 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_focus(query: &str, result: &FilesResult) {
-    // Match the query against file paths (partial match).
-    let matches: Vec<&FileRow> = result
-        .rows
-        .iter()
-        .filter(|r| r.file.contains(query))
-        .collect();
-
+fn print_focus(query: &str, matches: &[FocusFile<'_>], result: &FilesResult) {
     if matches.is_empty() {
         eprintln!("no file matching '{}' found", query);
         return;
     }
 
-    for row in &matches {
+    for entry in matches {
+        let row = entry.row;
         println!("\n{:=<80}", "");
         println!("focus: {}", row.file);
         println!(
@@ -3949,26 +3986,16 @@ fn print_focus(query: &str, result: &FilesResult) {
         }
 
         // Direct imports (this file depends on).
-        let imports: Vec<&str> = result
-            .direct_edges
-            .iter()
-            .filter(|(from, _)| from == &row.file)
-            .map(|(_, to)| to.as_str())
-            .collect();
+        let imports = &entry.imports;
         if !imports.is_empty() {
             println!("  imports ({}):", imports.len());
-            for imp in &imports {
+            for imp in imports {
                 println!("    -> {}", imp);
             }
         }
 
         // Direct dependents (files that import this one).
-        let dependents: Vec<&str> = result
-            .direct_edges
-            .iter()
-            .filter(|(_, to)| to == &row.file)
-            .map(|(from, _)| from.as_str())
-            .collect();
+        let dependents = &entry.imported_by;
         if !dependents.is_empty() {
             println!("  imported by ({}):", dependents.len());
             for dep in dependents.iter().take(15) {
