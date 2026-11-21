@@ -35,6 +35,17 @@ pkgrank files . --affected src/parser.rs
 git diff --name-only | pkgrank files . --affected -
 ```
 
+When output is piped, `files` writes one JSON object. With `--affected`,
+`.changed` lists the inputs and `.affected` lists their transitive dependents,
+excluding the inputs themselves. An empty result has `.affected_count == 0`
+and `.affected == []`. With `--focus`, `.focus` contains the matching file
+rows with their `imports` and `imported_by` paths. Both options work together.
+For example:
+
+```bash
+pkgrank files . --affected src/parser.rs | jq -r '.affected[]'
+```
+
 Rows include structural role, PageRank, consumer PageRank, betweenness,
 instability, blast radius, cycle membership, external dependencies, and optional
 git churn fields.
