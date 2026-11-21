@@ -275,30 +275,35 @@ pub(crate) fn detect_ecosystem(dir: &Path) -> Option<Ecosystem> {
     detect_all_ecosystems(dir).into_iter().next()
 }
 
+mod nested;
+use nested::{unscanned_projects, UnscannedProject};
+
+const ECOSYSTEM_MARKERS: &[(Ecosystem, &[&str])] = &[
+    (Ecosystem::Rust, &["Cargo.toml"]),
+    (Ecosystem::Go, &["go.mod"]),
+    (
+        Ecosystem::Python,
+        &["pyproject.toml", "setup.py", "uv.lock"],
+    ),
+    (
+        Ecosystem::Js,
+        &[
+            "package.json",
+            "deno.json",
+            "deno.jsonc",
+            "import_map.json",
+            "package-lock.json",
+        ],
+    ),
+];
+
 /// Detect all ecosystems present in a directory.
 pub(crate) fn detect_all_ecosystems(dir: &Path) -> Vec<Ecosystem> {
-    let mut ecosystems = Vec::new();
-    if dir.join("Cargo.toml").exists() {
-        ecosystems.push(Ecosystem::Rust);
-    }
-    if dir.join("go.mod").exists() {
-        ecosystems.push(Ecosystem::Go);
-    }
-    if dir.join("pyproject.toml").exists()
-        || dir.join("uv.lock").exists()
-        || dir.join("setup.py").exists()
-    {
-        ecosystems.push(Ecosystem::Python);
-    }
-    if dir.join("package.json").exists()
-        || dir.join("package-lock.json").exists()
-        || dir.join("deno.json").exists()
-        || dir.join("deno.jsonc").exists()
-        || dir.join("import_map.json").exists()
-    {
-        ecosystems.push(Ecosystem::Js);
-    }
-    ecosystems
+    ECOSYSTEM_MARKERS
+        .iter()
+        .filter(|(_, markers)| markers.iter().any(|marker| dir.join(marker).exists()))
+        .map(|(ecosystem, _)| *ecosystem)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -395,6 +400,55 @@ fn discover_files_git(root: &Path, extensions: &[&str]) -> Option<Vec<PathBuf>> 
     Some(files)
 }
 
+fn excluded_source_dir(name: &str) -> bool {
+    matches!(
+        name,
+        "target"
+            | "node_modules"
+            | ".git"
+            | "__pycache__"
+            | ".mypy_cache"
+            | ".pytest_cache"
+            | "dist"
+            | "build"
+            | "out"
+            | ".next"
+            | ".vercel"
+            | ".nuxt"
+            | ".svelte-kit"
+            | ".angular"
+            | "coverage"
+            | "vendor"
+            | ".venv"
+            | "venv"
+            | ".tox"
+            | ".nox"
+            | "archive"
+            | ".eggs"
+            | "*.egg-info"
+            | "testdata"
+            | "fixtures"
+            | "migrations"
+            | "assets"
+            | "static"
+            | "public"
+            | "templates"
+            | "generated"
+            | "gen"
+            | "proto"
+            | "third_party"
+            | "third-party"
+            | "external"
+            | "docs"
+            | "doc"
+            | "site"
+            | ".cache"
+            | ".parcel-cache"
+            | ".turbo"
+            | "storybook-static"
+    )
+}
+
 fn walk_dir(dir: &Path, extensions: &[&str], out: &mut Vec<PathBuf>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -405,52 +459,7 @@ fn walk_dir(dir: &Path, extensions: &[&str], out: &mut Vec<PathBuf>) {
         if path.is_dir() {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             // Skip common non-source directories.
-            if matches!(
-                name,
-                "target"
-                    | "node_modules"
-                    | ".git"
-                    | "__pycache__"
-                    | ".mypy_cache"
-                    | ".pytest_cache"
-                    | "dist"
-                    | "build"
-                    | "out"
-                    | ".next"
-                    | ".vercel"
-                    | ".nuxt"
-                    | ".svelte-kit"
-                    | ".angular"
-                    | "coverage"
-                    | "vendor"
-                    | ".venv"
-                    | "venv"
-                    | ".tox"
-                    | ".nox"
-                    | "archive"
-                    | ".eggs"
-                    | "*.egg-info"
-                    | "testdata"
-                    | "fixtures"
-                    | "migrations"
-                    | "assets"
-                    | "static"
-                    | "public"
-                    | "templates"
-                    | "generated"
-                    | "gen"
-                    | "proto"
-                    | "third_party"
-                    | "third-party"
-                    | "external"
-                    | "docs"
-                    | "doc"
-                    | "site"
-                    | ".cache"
-                    | ".parcel-cache"
-                    | ".turbo"
-                    | "storybook-static"
-            ) {
+            if excluded_source_dir(name) {
                 continue;
             }
             walk_dir(&path, extensions, out);
@@ -2387,6 +2396,8 @@ pub(crate) struct FilesResult {
     pub cycles: Vec<Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub direct_edges: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unscanned_projects: Vec<UnscannedProject>,
     /// Commit SHA analyzed when the target was a remote URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<String>,
@@ -3086,13 +3097,19 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
     };
 
     // Determine ecosystem(s) to analyze.
+    let mut unscanned = Vec::new();
     let ecosystems: Vec<Ecosystem> = if let Some(eco) = args.ecosystem {
         vec![eco]
     } else {
         let detected = detect_all_ecosystems(&root);
+        unscanned = unscanned_projects(&root, &detected);
         if detected.is_empty() {
+            let hints = unscanned
+                .iter()
+                .map(|project| format!("\n{project}"))
+                .collect::<String>();
             return Err(anyhow::anyhow!(
-                "Could not detect ecosystem in {}. Pass --ecosystem explicitly.",
+                "Could not detect ecosystem in {}. Pass --ecosystem explicitly.{hints}",
                 root.display()
             ));
         }
@@ -3114,6 +3131,7 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
         let key = files_cache_key(&all_files, args);
         if let Some(mut cached) = files_cache_read(&cache_dir, key) {
             cached.source_commit = source_commit;
+            cached.unscanned_projects = unscanned;
             return Ok(cached);
         }
     }
@@ -3507,6 +3525,7 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
         rows,
         direct_edges: av.direct_edges,
         source_commit,
+        unscanned_projects: unscanned,
     };
 
     // Cache write.
@@ -3544,6 +3563,8 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                 ecosystem: Ecosystem,
                 #[serde(skip_serializing_if = "Option::is_none")]
                 source_commit: Option<String>,
+                #[serde(skip_serializing_if = "Vec::is_empty")]
+                unscanned_projects: Vec<UnscannedProject>,
                 nodes: usize,
                 edges: usize,
                 orphan_count: usize,
@@ -3565,6 +3586,7 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                 command: "files",
                 ecosystem: result.ecosystem,
                 source_commit: result.source_commit.clone(),
+                unscanned_projects: result.unscanned_projects.clone(),
                 nodes: result.nodes,
                 edges: result.edges,
                 orphan_count: result.orphan_count,
@@ -3594,6 +3616,9 @@ pub(crate) fn run_files(args: &FilesArgs) -> Result<()> {
                 "pkgrank files  ecosystem={}  metric={:?}  include_tests={}{}{}\n",
                 result.ecosystem, args.metric, args.include_tests, git_label, commit_label
             );
+            for project in &result.unscanned_projects {
+                println!("{project}");
+            }
             if args.git {
                 println!(
                     "{:>4}  {:>8}  {:>5}  {:>10}  {:>5}  {:>3}  {:>3}  {:<10}  file",
