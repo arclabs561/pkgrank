@@ -102,7 +102,12 @@ Every JSON result carries the same stable wrapper fields: `schema_version`,
 `ok`, `command`, and `rows`.
 
 `pkgrank files` also reports cycle counts, orphan counts, layer violations, and
-rule violations. By default it stores each run in a local SQLite database for
+rule violations. It selects ecosystems from manifests at the scan root. If a
+tracked nested project uses another ecosystem, text output gives a command to
+scan it from that root. JSON lists its `ecosystem` and relative `manifest` in
+`unscanned_projects`. An explicit `--ecosystem` suppresses these hints.
+
+By default it stores each run in a local SQLite database for
 `pkgrank query`; pass `--store false` to skip that.
 
 ## Limits
