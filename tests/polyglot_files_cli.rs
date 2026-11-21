@@ -110,3 +110,63 @@ fn changing_the_metric_with_a_warm_cache_returns_the_new_top_file() {
     let outbound = files(root, &["--cache", "--metric", "outdegree", "--top", "1"]);
     assert!(outbound.contains_key("src/lib.rs"));
 }
+
+#[test]
+fn rust_roles_are_relative_to_the_nearest_package() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers=['crates/*']\n",
+    )
+    .unwrap();
+    for path in [
+        "crates/a/src/lib.rs",
+        "crates/a/src/main.rs",
+        "crates/a/src/bin/report.rs",
+        "crates/a/src/tests/helpers.rs",
+        "crates/a/src/examples/method.rs",
+        "crates/a/tests/tensor/ops/mod.rs",
+        "crates/a/benches/latency.rs",
+        "crates/a/examples/demo.rs",
+        "crates/a/build.rs",
+        "tools/tests/example.rs",
+    ] {
+        let path = root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "").unwrap();
+    }
+
+    let manifest = root.join("crates/a/Cargo.toml");
+    fs::write(&manifest, "[package]\nname='a'\nversion='0.1.0'\n").unwrap();
+    let production = files(root, &["--cache"]);
+    assert_eq!(production.len(), 6);
+    assert_eq!(production["crates/a/src/lib.rs"]["role"], "lib_root");
+    for path in ["crates/a/src/main.rs", "crates/a/src/bin/report.rs"] {
+        assert_eq!(production[path]["role"], "bin_entry");
+    }
+    for path in [
+        "crates/a/src/tests/helpers.rs",
+        "crates/a/src/examples/method.rs",
+        "tools/tests/example.rs",
+    ] {
+        assert_eq!(production[path]["role"], "source");
+    }
+
+    let tests = files(root, &["--include-tests"]);
+    assert_eq!(tests.len(), 7);
+    assert_eq!(tests["crates/a/tests/tensor/ops/mod.rs"]["role"], "test");
+    let all = files(root, &["--include-all"]);
+    assert_eq!(all.len(), 10);
+    assert_eq!(all["crates/a/examples/demo.rs"]["role"], "example");
+    assert_eq!(all["crates/a/benches/latency.rs"]["role"], "bench");
+    assert_eq!(all["crates/a/build.rs"]["role"], "build");
+
+    // Changing only the manifest changes ownership, even with the cache warm.
+    fs::write(&manifest, "[workspace]\n").unwrap();
+    let changed = files(root, &["--cache"]);
+    assert_eq!(
+        changed["crates/a/tests/tensor/ops/mod.rs"]["role"],
+        "source"
+    );
+}

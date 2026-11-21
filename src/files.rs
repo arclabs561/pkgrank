@@ -1,6 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
@@ -109,41 +109,45 @@ pub(crate) enum FileRole {
     Build,
 }
 
-fn classify_rust_file(path: &Path, project_root: &Path) -> FileRole {
-    let rel = path.strip_prefix(project_root).unwrap_or(path);
-    let rel_str = rel.to_string_lossy();
-
-    // build.rs at project root
-    if rel_str == "build.rs" {
-        return FileRole::Build;
+/// Find package boundaries only along paths that the Rust scan discovered.
+/// A virtual workspace manifest does not introduce a nested package.
+fn rust_package_roots(root: &Path, files: &[PathBuf]) -> BTreeSet<PathBuf> {
+    let mut visited = HashSet::new();
+    let mut packages = BTreeSet::new();
+    for file in files {
+        for dir in file.ancestors().skip(1) {
+            if !dir.starts_with(root) || !visited.insert(dir) {
+                break;
+            }
+            if std::fs::read_to_string(dir.join("Cargo.toml"))
+                .ok()
+                .and_then(|text| text.parse::<toml::Table>().ok())
+                .is_some_and(|manifest| manifest.get("package").is_some_and(toml::Value::is_table))
+            {
+                packages.insert(dir.to_owned());
+            }
+        }
     }
+    packages
+}
 
-    // tests/ directory → integration tests
-    if rel_str.starts_with("tests/") || rel_str.starts_with("tests\\") {
-        return FileRole::Test;
+fn classify_rust_file(path: &Path, package_root: &Path) -> FileRole {
+    let rel = path.strip_prefix(package_root).unwrap_or(path);
+    if rel == Path::new("build.rs") {
+        FileRole::Build
+    } else if rel.starts_with("tests") {
+        FileRole::Test
+    } else if rel.starts_with("benches") {
+        FileRole::Bench
+    } else if rel.starts_with("examples") {
+        FileRole::Example
+    } else if rel == Path::new("src/main.rs") || rel.starts_with("src/bin") {
+        FileRole::BinEntry
+    } else if rel == Path::new("src/lib.rs") {
+        FileRole::LibRoot
+    } else {
+        FileRole::Source
     }
-
-    // benches/ directory
-    if rel_str.starts_with("benches/") || rel_str.starts_with("benches\\") {
-        return FileRole::Bench;
-    }
-
-    // examples/ directory
-    if rel_str.starts_with("examples/") || rel_str.starts_with("examples\\") {
-        return FileRole::Example;
-    }
-
-    // src/main.rs or src/bin/*.rs
-    if rel_str == "src/main.rs" || rel_str.starts_with("src/bin/") {
-        return FileRole::BinEntry;
-    }
-
-    // src/lib.rs
-    if rel_str == "src/lib.rs" {
-        return FileRole::LibRoot;
-    }
-
-    FileRole::Source
 }
 
 fn classify_python_file(path: &Path, project_root: &Path) -> FileRole {
@@ -249,9 +253,21 @@ fn classify_go_file(path: &Path, project_root: &Path) -> FileRole {
     FileRole::Source
 }
 
-fn classify_file(path: &Path, project_root: &Path, ecosystem: Ecosystem) -> FileRole {
+fn classify_file(
+    path: &Path,
+    project_root: &Path,
+    ecosystem: Ecosystem,
+    rust_packages: &BTreeSet<PathBuf>,
+) -> FileRole {
     match ecosystem {
-        Ecosystem::Rust => classify_rust_file(path, project_root),
+        Ecosystem::Rust => {
+            let package = path
+                .ancestors()
+                .skip(1)
+                .find(|dir| rust_packages.contains(*dir))
+                .unwrap_or(project_root);
+            classify_rust_file(path, package)
+        }
         Ecosystem::Python => classify_python_file(path, project_root),
         Ecosystem::Js => classify_js_file(path, project_root),
         Ecosystem::Go => classify_go_file(path, project_root),
@@ -3022,10 +3038,14 @@ fn expand_uri(s: &str) -> String {
 }
 
 /// Compute a cache key from file paths + mtimes + analysis args.
-const FILES_CACHE_FORMAT_VERSION: u8 = 3;
+const FILES_CACHE_FORMAT_VERSION: u8 = 4;
 const FILES_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
-fn files_cache_key(file_groups: &[(Ecosystem, Vec<PathBuf>)], args: &FilesArgs) -> u64 {
+fn files_cache_key(
+    file_groups: &[(Ecosystem, Vec<PathBuf>)],
+    rust_packages: &BTreeSet<PathBuf>,
+    args: &FilesArgs,
+) -> u64 {
     let mut material = format!(
         "cache_format={}\nv={}\necosystem={:?}\nmetric={:?}\ndir={}\ngit={}\ngit_days={}\ntests={}\nall={}\n",
         FILES_CACHE_FORMAT_VERSION,
@@ -3038,6 +3058,9 @@ fn files_cache_key(file_groups: &[(Ecosystem, Vec<PathBuf>)], args: &FilesArgs) 
         args.include_tests,
         args.include_all,
     );
+    for package in rust_packages {
+        material.push_str(&format!("rust_package={}\n", package.display()));
+    }
     for (ecosystem, files) in file_groups {
         material.push_str(&format!("{ecosystem}\n"));
         for f in files {
@@ -3114,8 +3137,15 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
         })
         .collect();
 
+    let rust_packages = file_groups
+        .iter()
+        .find(|(eco, _)| matches!(eco, Ecosystem::Rust))
+        .map(|(_, files)| rust_package_roots(&root, files))
+        .unwrap_or_default();
     let cache_dir = root.join("evals/pkgrank/files_cache");
-    let cache_key = args.cache.then(|| files_cache_key(&file_groups, args));
+    let cache_key = args
+        .cache
+        .then(|| files_cache_key(&file_groups, &rust_packages, args));
     if let Some(key) = cache_key {
         if let Some(mut cached) = files_cache_read(&cache_dir, key) {
             cached.source_commit = source_commit;
@@ -3129,7 +3159,7 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
     let mut external_deps_map = HashMap::new();
     for (eco, mut files) in file_groups {
         files.retain(|file| {
-            let role = classify_file(file, &root, eco);
+            let role = classify_file(file, &root, eco, &rust_packages);
             if should_include(role, args) {
                 file_roles.insert(file.clone(), role);
                 true
