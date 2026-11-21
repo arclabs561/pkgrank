@@ -3022,30 +3022,34 @@ fn expand_uri(s: &str) -> String {
 }
 
 /// Compute a cache key from file paths + mtimes + analysis args.
-const FILES_CACHE_FORMAT_VERSION: u8 = 2;
+const FILES_CACHE_FORMAT_VERSION: u8 = 3;
 const FILES_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
-fn files_cache_key(files: &[PathBuf], args: &FilesArgs) -> u64 {
+fn files_cache_key(file_groups: &[(Ecosystem, Vec<PathBuf>)], args: &FilesArgs) -> u64 {
     let mut material = format!(
-        "cache_format={}\nv={}\necosystem={:?}\ndir={}\ngit={}\ngit_days={}\ntests={}\nall={}\n",
+        "cache_format={}\nv={}\necosystem={:?}\nmetric={:?}\ndir={}\ngit={}\ngit_days={}\ntests={}\nall={}\n",
         FILES_CACHE_FORMAT_VERSION,
         env!("CARGO_PKG_VERSION"),
         args.ecosystem,
+        args.metric,
         args.directory,
         args.git,
         args.git_days,
         args.include_tests,
         args.include_all,
     );
-    for f in files {
-        let mtime = f
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        material.push_str(&format!("{}:{}\n", f.display(), mtime));
+    for (ecosystem, files) in file_groups {
+        material.push_str(&format!("{ecosystem}\n"));
+        for f in files {
+            let mtime = f
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            material.push_str(&format!("{}:{}\n", f.display(), mtime));
+        }
     }
     fnv1a64(material.as_bytes())
 }
@@ -3100,70 +3104,47 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
     };
     let ecosystem = ecosystems[0]; // Primary ecosystem for display.
 
-    // Discover files across all detected ecosystems.
-    let mut all_files = Vec::new();
-    for eco in &ecosystems {
-        all_files.extend(discover_files(&root, *eco));
-    }
-    all_files.sort();
-    all_files.dedup();
+    let file_groups: Vec<_> = ecosystems
+        .iter()
+        .map(|&eco| {
+            let mut files = discover_files(&root, eco);
+            files.sort();
+            files.dedup();
+            (eco, files)
+        })
+        .collect();
 
-    // Cache check: use file paths + mtimes as cache key.
     let cache_dir = root.join("evals/pkgrank/files_cache");
-    if args.cache {
-        let key = files_cache_key(&all_files, args);
+    let cache_key = args.cache.then(|| files_cache_key(&file_groups, args));
+    if let Some(key) = cache_key {
         if let Some(mut cached) = files_cache_read(&cache_dir, key) {
             cached.source_commit = source_commit;
             return Ok(cached);
         }
     }
 
-    let mut included_files: Vec<PathBuf> = Vec::new();
-    let mut file_roles: HashMap<PathBuf, FileRole> = HashMap::new();
-
-    for file in &all_files {
-        let role = classify_file(file, &root, ecosystem);
-        if should_include(role, args) {
-            included_files.push(file.clone());
-            file_roles.insert(file.clone(), role);
-        }
-    }
-
-    // Parse imports for each ecosystem and merge edges.
+    let mut included_files = Vec::new();
+    let mut file_roles = HashMap::new();
     let mut edges = Vec::new();
-    for eco in &ecosystems {
-        let eco_files: Vec<PathBuf> = included_files
-            .iter()
-            .filter(|f| {
-                let ext = f.extension().and_then(|e| e.to_str()).unwrap_or("");
-                match eco {
-                    Ecosystem::Rust => ext == "rs",
-                    Ecosystem::Python => ext == "py",
-                    Ecosystem::Js => {
-                        matches!(ext, "ts" | "tsx" | "js" | "jsx" | "mjs" | "svelte" | "vue")
-                    }
-                    Ecosystem::Go => ext == "go",
-                }
-            })
-            .cloned()
-            .collect();
-        let eco_edges = match eco {
-            Ecosystem::Rust => parse_rust_imports(&root, &eco_files),
-            Ecosystem::Python => parse_python_imports(&root, &eco_files),
-            Ecosystem::Js => parse_js_imports(&root, &eco_files),
-            Ecosystem::Go => parse_go_imports(&root, &eco_files),
-        };
-        edges.extend(eco_edges);
-    }
+    let mut external_deps_map = HashMap::new();
+    for (eco, mut files) in file_groups {
+        files.retain(|file| {
+            let role = classify_file(file, &root, eco);
+            if should_include(role, args) {
+                file_roles.insert(file.clone(), role);
+                true
+            } else {
+                false
+            }
+        });
+        edges.extend(match eco {
+            Ecosystem::Rust => parse_rust_imports(&root, &files),
+            Ecosystem::Python => parse_python_imports(&root, &files),
+            Ecosystem::Js => parse_js_imports(&root, &files),
+            Ecosystem::Go => parse_go_imports(&root, &files),
+        });
 
-    // Cross-language seam edges (PyO3: Python -> Rust, NAPI: JS -> Rust).
-    if ecosystems.contains(&Ecosystem::Rust) && ecosystems.len() > 1 {
-        edges.extend(detect_ffi_seams(&root, &included_files, &ecosystems));
-    }
-
-    // Extract external dependency names per file.
-    let mut internal_prefixes: HashSet<String> = HashSet::new();
-    for eco in &ecosystems {
+        let mut internal_prefixes = HashSet::new();
         match eco {
             Ecosystem::Rust => {
                 let crate_roots = find_rust_crate_roots(&root);
@@ -3171,7 +3152,7 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
                     internal_prefixes.insert(name.clone());
                 }
                 // Also add all known module names (from mod declarations) as internal.
-                for file in &included_files {
+                for file in &files {
                     if let Ok(content) = std::fs::read_to_string(file) {
                         for line in content.lines() {
                             if let Some(mod_name) = parse_mod_declaration(line.trim()) {
@@ -3193,8 +3174,15 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
             }
             Ecosystem::Js => {} // JS doesn't have a simple internal prefix
         }
+        external_deps_map.extend(extract_external_deps(&files, eco, &internal_prefixes));
+        included_files.extend(files);
     }
-    let external_deps_map = extract_external_deps(&included_files, ecosystem, &internal_prefixes);
+    included_files.sort();
+
+    // Cross-language seam edges (PyO3: Python -> Rust, NAPI: JS -> Rust).
+    if ecosystems.contains(&Ecosystem::Rust) && ecosystems.len() > 1 {
+        edges.extend(detect_ffi_seams(&root, &included_files, &ecosystems));
+    }
 
     let mut graph: DiGraph<PathBuf, f64> = DiGraph::new();
     let mut node_map: HashMap<PathBuf, NodeIndex> = HashMap::new();
@@ -3510,8 +3498,7 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
     };
 
     // Cache write.
-    if args.cache {
-        let key = files_cache_key(&all_files, args);
+    if let Some(key) = cache_key {
         files_cache_write(&cache_dir, key, &result);
     }
 
