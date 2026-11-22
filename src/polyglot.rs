@@ -175,6 +175,10 @@ struct NpmLockV3 {
 
 #[derive(Deserialize)]
 struct NpmPackageEntry {
+    name: Option<String>,
+    #[serde(default)]
+    link: bool,
+    resolved: Option<String>,
     version: Option<String>,
     #[serde(default)]
     dependencies: HashMap<String, String>,
@@ -191,12 +195,24 @@ pub(crate) fn parse_npm_lock(path: &Path) -> ParseResult {
     let lock: NpmLockV3 =
         serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
 
-    // Keys are like "node_modules/express" or "node_modules/a/node_modules/b".
-    // The package name is the part after the last "node_modules/".
-    let npm_name = |key: &str| -> String {
-        match key.rfind("node_modules/") {
-            Some(pos) => key[pos + "node_modules/".len()..].to_string(),
-            None => key.to_string(),
+    // Workspace targets live outside node_modules. npm omits their name
+    // when it is the directory basename. Installed names may include a scope.
+    let package_node = |key: &str, entry: &NpmPackageEntry| {
+        let installed_name = key
+            .rsplit_once("/node_modules/")
+            .map(|(_, name)| name)
+            .or_else(|| key.strip_prefix("node_modules/"));
+        let name = match installed_name {
+            Some(installed) => installed,
+            None => entry
+                .name
+                .as_deref()
+                .unwrap_or_else(|| key.rsplit('/').next().unwrap_or(key)),
+        };
+        DepNode {
+            name: name.to_owned(),
+            version: entry.version.clone(),
+            ecosystem: Ecosystem::Js,
         }
     };
 
@@ -204,24 +220,32 @@ pub(crate) fn parse_npm_lock(path: &Path) -> ParseResult {
     let mut edges = Vec::new();
 
     for (key, entry) in &lock.packages {
-        if key.is_empty() {
-            // Root project entry.
+        if key.is_empty() || entry.link {
+            // The target entry supplies both the package and its dependencies.
             continue;
         }
-        let node = DepNode {
-            name: npm_name(key),
-            version: entry.version.clone(),
-            ecosystem: Ecosystem::Js,
-        };
+        let node = package_node(key, entry);
         let from = node.id();
         packages.push(node);
 
         for dep_name in entry.dependencies.keys() {
             let to = match resolve_npm_dep(&lock.packages, key, dep_name) {
-                Some(dep_key) => dep_id(
-                    &npm_name(dep_key),
-                    lock.packages[dep_key].version.as_deref(),
-                ),
+                Some(dep_key) => {
+                    let installed = &lock.packages[dep_key];
+                    if installed.link {
+                        let (target, entry) = installed
+                            .resolved
+                            .as_ref()
+                            .and_then(|target| lock.packages.get_key_value(target))
+                            .filter(|(_, entry)| !entry.link)
+                            .with_context(|| {
+                                format!("missing package target for npm link {dep_key}")
+                            })?;
+                        package_node(target, entry).id()
+                    } else {
+                        package_node(dep_key, installed).id()
+                    }
+                }
                 None => {
                     // Not installed (e.g. an unmet optional or peer dependency).
                     packages.push(DepNode {

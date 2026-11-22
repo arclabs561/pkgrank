@@ -90,6 +90,12 @@ When the graph contains multiple versions of a package, pass its exact
 `name@version`. If multiple Cargo sources supply the same name and version,
 use a full package ID from the ambiguity message.
 
+For an npm workspace chain `app -> bridge -> leaf`, querying the blast radius
+of `leaf` lists `bridge` at depth 1 and `app` at depth 2. The lockfile's link
+to a workspace and the target containing its dependencies represent one package.
+The graph covers installed packages and workspaces and omits the lockfile’s
+empty-key root project entry. See the [npm package-lock specification](https://docs.npmjs.com/cli/v11/configuring-npm/package-lock-json/#packages).
+
 Output is sorted by BFS depth, then by PageRank within each depth.
 
 ## Upgrade Priority
