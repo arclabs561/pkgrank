@@ -102,7 +102,9 @@ Every JSON result carries the same stable wrapper fields: `schema_version`,
 `ok`, `command`, and `rows`.
 
 `pkgrank files` also reports cycle counts, orphan counts, layer violations, and
-rule violations. It selects ecosystems from manifests at the scan root. If a
+rule violations. It selects ecosystems from manifests at the scan root. In a
+Git checkout with no detected root or nested manifest, it uses tracked source
+files in the selected scope to identify supported languages. If a
 tracked nested project uses another ecosystem, text output gives a command to
 scan it from that root. JSON lists its `ecosystem` and relative `manifest` in
 `unscanned_projects`. An explicit `--ecosystem` suppresses these hints.

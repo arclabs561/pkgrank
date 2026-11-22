@@ -325,16 +325,20 @@ pub(crate) fn detect_all_ecosystems(dir: &Path) -> Vec<Ecosystem> {
 // File discovery
 // ---------------------------------------------------------------------------
 
-fn discover_files(root: &Path, ecosystem: Ecosystem) -> Vec<PathBuf> {
-    let extensions: &[&str] = match ecosystem {
+fn source_extensions(ecosystem: Ecosystem) -> &'static [&'static str] {
+    match ecosystem {
         Ecosystem::Rust => &["rs"],
         Ecosystem::Python => &["py"],
         Ecosystem::Js => &["ts", "tsx", "js", "jsx", "mjs", "svelte", "vue"],
         Ecosystem::Go => &["go"],
-    };
+    }
+}
+
+fn discover_files(root: &Path, ecosystem: Ecosystem) -> Vec<PathBuf> {
+    let extensions = source_extensions(ecosystem);
 
     // Prefer `git ls-files` to respect .gitignore (skips generated/vendored files).
-    if let Some(files) = discover_files_git(root, extensions) {
+    if let Some(files) = discover_files_git(root, extensions, false) {
         if !files.is_empty() {
             return files;
         }
@@ -348,18 +352,23 @@ fn discover_files(root: &Path, ecosystem: Ecosystem) -> Vec<PathBuf> {
 }
 
 /// Use `git ls-files` to discover tracked source files (respects .gitignore).
-fn discover_files_git(root: &Path, extensions: &[&str]) -> Option<Vec<PathBuf>> {
-    let out = ProcessCommand::new("git")
-        .args(["ls-files", "--cached", "--others", "--exclude-standard"])
-        .current_dir(root)
-        .output()
-        .ok()?;
+fn discover_files_git(
+    root: &Path,
+    extensions: &[&str],
+    tracked_only: bool,
+) -> Option<Vec<PathBuf>> {
+    let mut cmd = ProcessCommand::new("git");
+    cmd.current_dir(root).args(["ls-files", "-z", "--cached"]);
+    if !tracked_only {
+        cmd.args(["--others", "--exclude-standard"]);
+    }
+    let out = cmd.output().ok()?;
     if !out.status.success() {
         return None;
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
     let files: Vec<PathBuf> = stdout
-        .lines()
+        .split('\0')
         .filter(|l| !l.is_empty())
         .filter(|l| {
             l.rsplit('.')
@@ -1370,6 +1379,16 @@ fn parse_python_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
                     mod_to_file.insert(mod_path.clone(), file.clone());
                     file_to_mod.insert(file.clone(), mod_path);
                 }
+            }
+        }
+    }
+    // Scripts run from the project root can import adjacent top-level modules.
+    for file in files.iter().filter(|file| file.parent() == Some(root)) {
+        if let Some(name) = file.file_stem().and_then(|name| name.to_str()) {
+            if name != "__init__" {
+                mod_to_file
+                    .entry(name.to_owned())
+                    .or_insert_with(|| file.clone());
             }
         }
     }
@@ -3127,8 +3146,26 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
     let ecosystems: Vec<Ecosystem> = if let Some(eco) = args.ecosystem {
         vec![eco]
     } else {
-        let detected = detect_all_ecosystems(&root);
+        let mut detected = detect_all_ecosystems(&root);
         unscanned = unscanned_projects(&root, &detected);
+        // Tracked scripts can form an import graph even without a package manifest.
+        // Keep nested manifest hints when those projects need their own resolver roots.
+        if detected.is_empty() && unscanned.is_empty() {
+            for &(eco, _) in ECOSYSTEM_MARKERS {
+                let files = discover_files_git(&root, source_extensions(eco), true);
+                if files.is_some_and(|files| {
+                    files.iter().any(|path| {
+                        path.is_file()
+                            && should_include(
+                                classify_file(path, &root, eco, &BTreeSet::new()),
+                                args,
+                            )
+                    })
+                }) {
+                    detected.push(eco);
+                }
+            }
+        }
         if detected.is_empty() {
             let hints = unscanned
                 .iter()

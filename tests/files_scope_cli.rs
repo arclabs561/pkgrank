@@ -108,3 +108,28 @@ fn an_empty_root_points_to_its_nested_project() {
     let out = scan(tmp.path(), &["--format", "text"]).failure();
     assert!(String::from_utf8_lossy(&out.get_output().stderr).contains("pkgrank files './nested'"));
 }
+
+#[test]
+fn manifestless_git_scripts_use_in_scope_tracked_sources() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    git(root, &["init", "-q"]);
+    write(root, "notes.md", "notes");
+    write(root, "vendor/lib.rs", "");
+    write(root, "examples/sample.py", "pass");
+    git(root, &["add", "."]);
+    write(root, "untracked.js", "export const n = 1;");
+    scan(root, &[]).failure();
+    assert_eq!(
+        report(root, &["--format", "json", "--include-all"])["nodes"],
+        1
+    );
+    write(root, "main.py", "import helper");
+    write(root, "helper.py", "value = 1");
+    write(root, "ui/café.ts", "export const n = 1;");
+    git(root, &["add", "main.py", "helper.py", "ui/café.ts"]);
+    fs::remove_file(root.join("untracked.js")).unwrap();
+    let data = report(root, &["--format", "json"]);
+    assert_eq!(data["nodes"], 3);
+    assert_eq!(data["edges"], 1);
+}
