@@ -888,10 +888,32 @@ fn parse_rust_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
     let mut mod_to_file: HashMap<String, PathBuf> = HashMap::new();
     let mut file_to_mod: HashMap<PathBuf, String> = HashMap::new();
     let mut file_to_crate: HashMap<PathBuf, String> = HashMap::new();
-    let mut known_crates: HashSet<String> = HashSet::new();
+    let root_ids: HashMap<&Path, usize> = crate_roots
+        .iter()
+        .enumerate()
+        .map(|(i, (dir, _))| (dir.as_path(), i))
+        .collect();
+    let physical_roots: HashMap<PathBuf, usize> = crate_roots
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (dir, _))| Some((dir.canonicalize().ok()?, i)))
+        .collect();
+    let mut unique_names = HashMap::new();
+    let mut scoped_names = Vec::new();
+    for (i, (dir, name)) in crate_roots.iter().enumerate() {
+        // Cargo library names are visible from the importing package. Distinct
+        // packages can legitimately use the same library name.
+        unique_names
+            .entry(name.as_str())
+            .and_modify(|v| *v = None)
+            .or_insert(Some(i));
+        let mut names = rust_path_imports(dir, &physical_roots, &crate_roots);
+        names.insert(name.clone(), Some(i));
+        scoped_names.push(names);
+    }
 
-    for (crate_dir, crate_name) in &crate_roots {
-        known_crates.insert(crate_name.clone());
+    for (i, (crate_dir, _)) in crate_roots.iter().enumerate() {
+        let namespace = format!("@{i}");
         // Standard layout: src/ under crate dir. Custom layout: source at crate dir itself.
         let src_dir = {
             let standard = crate_dir.join("src");
@@ -901,18 +923,26 @@ fn parse_rust_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
                 crate_dir.clone()
             }
         };
+        let tests_dir = crate_dir.join("tests");
+        let test_namespace = format!("@{i}:tests");
         for file in files {
-            if !file.starts_with(&src_dir) {
+            if file.ancestors().find_map(|p| root_ids.get(p)) != Some(&i) {
                 continue;
             }
-            if let Some(mod_path) = rust_file_to_mod_path(file, &src_dir, crate_name) {
+            let (module_root, module_namespace) = if file.starts_with(&tests_dir) {
+                (&tests_dir, &test_namespace)
+            } else {
+                (&src_dir, &namespace)
+            };
+            if let Some(mod_path) = rust_file_to_mod_path(file, module_root, module_namespace) {
                 mod_to_file.insert(mod_path.clone(), file.clone());
                 file_to_mod.insert(file.clone(), mod_path);
-                file_to_crate.insert(file.clone(), crate_name.clone());
+                file_to_crate.insert(file.clone(), module_namespace.clone());
             }
         }
     }
 
+    let physical_root = root.canonicalize().ok();
     let mut edges = Vec::new();
 
     for file in files {
@@ -927,14 +957,47 @@ fn parse_rust_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
             .cloned()
             .unwrap_or_else(|| "crate".to_string());
 
+        let owner = file.ancestors().find_map(|p| root_ids.get(p));
+        let import_namespace = |name: &str| {
+            owner
+                .and_then(|i| scoped_names[*i].get(name).copied())
+                .unwrap_or_else(|| unique_names.get(name).copied().flatten())
+                .map(|i| format!("@{i}"))
+        };
         let logical_lines = join_rust_logical_lines(&content);
 
+        let mut module_path = None;
         for line in &logical_lines {
             let line = line.trim();
-
+            if line.starts_with("#[") {
+                if let Some(("path", value)) = line
+                    .strip_prefix("#[")
+                    .and_then(|s| s.strip_suffix(']'))
+                    .and_then(|s| s.split_once('='))
+                    .map(|(k, v)| (k.trim(), v.trim()))
+                {
+                    module_path = serde_json::from_str::<String>(value).ok();
+                }
+                continue;
+            }
+            if line.is_empty() || line.starts_with("//") {
+                continue;
+            }
+            let explicit_path = module_path.take();
             if let Some(mod_name) = parse_mod_declaration(line) {
-                let child_mod = format!("{}::{}", this_mod, mod_name);
-                if let Some(target) = mod_to_file.get(&child_mod) {
+                let target = if let Some(path) = explicit_path {
+                    // A path attribute names a module file relative to its declaring file.
+                    // Only accept existing files in this graph, including paths through "..".
+                    file.parent()
+                        .and_then(|parent| parent.join(path).canonicalize().ok())
+                        .and_then(|p| {
+                            Some(root.join(p.strip_prefix(physical_root.as_ref()?).ok()?))
+                        })
+                        .filter(|p| file_to_mod.contains_key(p))
+                } else {
+                    mod_to_file.get(&format!("{this_mod}::{mod_name}")).cloned()
+                };
+                if let Some(target) = target.as_ref() {
                     if target != file {
                         edges.push(FileEdge {
                             from: file.clone(),
@@ -944,9 +1007,13 @@ fn parse_rust_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
                 }
             }
 
-            if let Some(targets) =
-                parse_use_statement(line, &this_mod, &crate_name, &known_crates, &mod_to_file)
-            {
+            if let Some(targets) = parse_use_statement(
+                line,
+                &this_mod,
+                &crate_name,
+                &import_namespace,
+                &mod_to_file,
+            ) {
                 for target in targets {
                     if target != *file {
                         edges.push(FileEdge {
@@ -1050,6 +1117,59 @@ fn join_paren_lines(content: &str) -> Vec<String> {
     }
 
     result
+}
+
+/// Resolve local path dependencies from their declaring manifest without running Cargo.
+fn rust_path_imports(
+    dir: &Path,
+    roots: &HashMap<PathBuf, usize>,
+    crates: &[(PathBuf, String)],
+) -> HashMap<String, Option<usize>> {
+    let mut imports = HashMap::new();
+    let Some(manifest) = std::fs::read_to_string(dir.join("Cargo.toml"))
+        .ok()
+        .and_then(|s| s.parse::<toml::Table>().ok())
+    else {
+        return imports;
+    };
+    let targets = manifest
+        .get("target")
+        .and_then(toml::Value::as_table)
+        .into_iter()
+        .flat_map(|table| table.values().filter_map(toml::Value::as_table));
+    for table in std::iter::once(&manifest).chain(targets) {
+        for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+            let Some(deps) = table.get(section).and_then(toml::Value::as_table) else {
+                continue;
+            };
+            for (name, dep) in deps {
+                let Some(index) = dep
+                    .get("path")
+                    .and_then(toml::Value::as_str)
+                    .and_then(|p| dir.join(p).canonicalize().ok())
+                    .and_then(|p| roots.get(&p))
+                else {
+                    continue;
+                };
+                let import = if dep.get("package").is_some() {
+                    name.replace('-', "_")
+                } else {
+                    crates[*index].1.clone()
+                };
+                // A target-specific alias may refer to different path dependencies.
+                // Without a selected target, leave that import unresolved.
+                imports
+                    .entry(import)
+                    .and_modify(|previous| {
+                        if *previous != Some(*index) {
+                            *previous = None;
+                        }
+                    })
+                    .or_insert(Some(*index));
+            }
+        }
+    }
+    imports
 }
 
 /// Find all crate roots in a project: (crate_dir, crate_name).
@@ -1222,7 +1342,7 @@ fn parse_use_statement(
     line: &str,
     current_mod: &str,
     crate_name: &str,
-    known_crates: &HashSet<String>,
+    import_namespace: &impl Fn(&str) -> Option<String>,
     mod_to_file: &HashMap<String, PathBuf>,
 ) -> Option<Vec<PathBuf>> {
     let line = line.trim();
@@ -1263,9 +1383,8 @@ fn parse_use_statement(
         (format!("{}::{}", current_mod, relative), "")
     } else {
         let first_seg = use_part.split("::").next().unwrap_or("");
-        if known_crates.contains(first_seg) {
-            // Cross-crate workspace import: `use other_crate::foo`.
-            (use_part.to_string(), "")
+        if let Some(namespace) = import_namespace(first_seg) {
+            (format!("{namespace}{}", &use_part[first_seg.len()..]), "")
         } else {
             // Try as bare sibling module: `use graph::Foo` → `current_mod::graph::Foo`.
             let sibling_mod = format!("{}::{}", current_mod, first_seg);
@@ -3089,7 +3208,7 @@ fn expand_uri(s: &str) -> String {
 }
 
 /// Compute a cache key from file paths + mtimes + analysis args.
-const FILES_CACHE_FORMAT_VERSION: u8 = 4;
+const FILES_CACHE_FORMAT_VERSION: u8 = 5;
 const FILES_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 fn files_cache_key(
@@ -3110,7 +3229,12 @@ fn files_cache_key(
         args.include_all,
     );
     for package in rust_packages {
-        material.push_str(&format!("rust_package={}\n", package.display()));
+        let manifest = std::fs::read(package.join("Cargo.toml")).unwrap_or_default();
+        material.push_str(&format!(
+            "rust_package={}:{}\n",
+            package.display(),
+            fnv1a64(&manifest)
+        ));
     }
     for (ecosystem, files) in file_groups {
         material.push_str(&format!("{ecosystem}\n"));
