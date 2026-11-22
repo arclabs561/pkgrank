@@ -245,3 +245,42 @@ fn nested_cargo_test_modules_reach_their_entrypoint() {
         json!(["units/tests/cases/mod.rs", "units/tests/driver.rs"])
     );
 }
+
+#[test]
+fn inherited_renamed_path_dependency_reaches_its_dependent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let workspace = "[workspace]\nmembers=['core','app']\n[workspace.dependencies]\nalias={path='core',package='core_impl'}\n";
+    write(root, "Cargo.toml", workspace);
+    write(
+        root,
+        "core/Cargo.toml",
+        "[package]\nname='core_impl'\nversion='0.1.0'\n",
+    );
+    write(root, "core/src/lib.rs", "pub struct Record;");
+    write(
+        root,
+        "app/Cargo.toml",
+        "[package]\nname='app'\nversion='0.1.0'\n[dependencies]\nalias.workspace=true\n",
+    );
+    write(root, "app/src/lib.rs", "pub use alias::Record;");
+    let run = || {
+        report(
+            root,
+            &[
+                "--format",
+                "json",
+                "--cache",
+                "--affected",
+                "core/src/lib.rs",
+            ],
+        )
+    };
+    assert_eq!(run()["affected"], json!(["app/src/lib.rs"]));
+    write(
+        root,
+        "Cargo.toml",
+        &workspace.replace("path='core'", "path='missing'"),
+    );
+    assert_eq!(run()["affected"], json!([]));
+}
