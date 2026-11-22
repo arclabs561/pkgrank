@@ -1103,6 +1103,13 @@ pub(crate) struct QueryArgs {
     pub top: usize,
 }
 
+fn path_suffix(path: &str, max_chars: usize) -> &str {
+    match path.char_indices().rev().nth(max_chars) {
+        Some((index, ch)) => &path[index + ch.len_utf8()..],
+        None => path,
+    }
+}
+
 #[allow(clippy::print_literal)]
 fn run_query(args: &QueryArgs) -> Result<()> {
     let db_path = store::default_db_path();
@@ -1172,11 +1179,7 @@ fn run_query(args: &QueryArgs) -> Result<()> {
                 let churn_str = churn
                     .map(|c| format!("{:.6}", c))
                     .unwrap_or_else(|| "-".to_string());
-                let short_proj = if project.len() > 30 {
-                    &project[project.len() - 30..]
-                } else {
-                    &project
-                };
+                let short_proj = path_suffix(&project, 30);
                 println!(
                     "{:>10.6}  {:>3}  {:>5}  {:>8}  {:<35}  {}",
                     pr, in_deg, deps, churn_str, file, short_proj
@@ -1278,11 +1281,7 @@ fn run_query(args: &QueryArgs) -> Result<()> {
                     .get::<_, Option<String>>(5)?
                     .unwrap_or_else(|| "-".to_string());
                 let analyzed: String = row.get(6)?;
-                let short = if path.len() > 40 {
-                    &path[path.len() - 40..]
-                } else {
-                    &path
-                };
+                let short = path_suffix(&path, 40);
                 println!(
                     "{:<40}  {:>5}  {:>5}  {:>3}  {:<8}  {:<9}  {}",
                     short, nodes, edges, cycles, eco, rev, analyzed
