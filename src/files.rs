@@ -914,21 +914,26 @@ fn parse_rust_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
                 crate_dir.clone()
             }
         };
+        let tests_dir = crate_dir.join("tests");
+        let test_namespace = format!("@{i}:tests");
         for file in files {
-            if !file.starts_with(&src_dir) {
-                continue;
-            }
             if file.ancestors().find_map(|p| root_ids.get(p)) != Some(&i) {
                 continue;
             }
-            if let Some(mod_path) = rust_file_to_mod_path(file, &src_dir, &namespace) {
+            let (module_root, module_namespace) = if file.starts_with(&tests_dir) {
+                (&tests_dir, &test_namespace)
+            } else {
+                (&src_dir, &namespace)
+            };
+            if let Some(mod_path) = rust_file_to_mod_path(file, module_root, module_namespace) {
                 mod_to_file.insert(mod_path.clone(), file.clone());
                 file_to_mod.insert(file.clone(), mod_path);
-                file_to_crate.insert(file.clone(), namespace.clone());
+                file_to_crate.insert(file.clone(), module_namespace.clone());
             }
         }
     }
 
+    let physical_root = root.canonicalize().ok();
     let mut edges = Vec::new();
 
     for file in files {
@@ -952,12 +957,38 @@ fn parse_rust_imports(root: &Path, files: &[PathBuf]) -> Vec<FileEdge> {
         };
         let logical_lines = join_rust_logical_lines(&content);
 
+        let mut module_path = None;
         for line in &logical_lines {
             let line = line.trim();
-
+            if line.starts_with("#[") {
+                if let Some(("path", value)) = line
+                    .strip_prefix("#[")
+                    .and_then(|s| s.strip_suffix(']'))
+                    .and_then(|s| s.split_once('='))
+                    .map(|(k, v)| (k.trim(), v.trim()))
+                {
+                    module_path = serde_json::from_str::<String>(value).ok();
+                }
+                continue;
+            }
+            if line.is_empty() || line.starts_with("//") {
+                continue;
+            }
+            let explicit_path = module_path.take();
             if let Some(mod_name) = parse_mod_declaration(line) {
-                let child_mod = format!("{}::{}", this_mod, mod_name);
-                if let Some(target) = mod_to_file.get(&child_mod) {
+                let target = if let Some(path) = explicit_path {
+                    // A path attribute names a module file relative to its declaring file.
+                    // Only accept existing files in this graph, including paths through "..".
+                    file.parent()
+                        .and_then(|parent| parent.join(path).canonicalize().ok())
+                        .and_then(|p| {
+                            Some(root.join(p.strip_prefix(physical_root.as_ref()?).ok()?))
+                        })
+                        .filter(|p| file_to_mod.contains_key(p))
+                } else {
+                    mod_to_file.get(&format!("{this_mod}::{mod_name}")).cloned()
+                };
+                if let Some(target) = target.as_ref() {
                     if target != file {
                         edges.push(FileEdge {
                             from: file.clone(),

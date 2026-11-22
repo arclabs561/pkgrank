@@ -207,3 +207,41 @@ fn crates_can_share_a_library_name_without_sharing_dependents() {
     );
     assert_eq!(run("src/lib.rs")["affected"], json!(["tests/core.rs"]));
 }
+
+#[test]
+fn nested_cargo_test_modules_reach_their_entrypoint() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write(root, "Cargo.toml", "[workspace]\nmembers=['units']\n");
+    write(
+        root,
+        "units/Cargo.toml",
+        "[package]\nname='units'\nversion='0.1.0'\n",
+    );
+    write(root, "units/src/lib.rs", "");
+    write(
+        root,
+        "units/tests/driver.rs",
+        "#[path = \"cases/mod.rs\"]\nmod suite;",
+    );
+    write(root, "units/tests/cases/mod.rs", "mod leaf;");
+    write(
+        root,
+        "units/tests/cases/leaf.rs",
+        "#[test] fn value() { assert_eq!(2 + 2, 4); }",
+    );
+    let doc = report(
+        root,
+        &[
+            "--include-tests",
+            "--format",
+            "json",
+            "--affected",
+            "units/tests/cases/leaf.rs",
+        ],
+    );
+    assert_eq!(
+        doc["affected"],
+        json!(["units/tests/cases/mod.rs", "units/tests/driver.rs"])
+    );
+}
