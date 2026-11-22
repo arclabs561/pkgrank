@@ -2956,17 +2956,32 @@ fn rules_dir(path: &str) -> PathBuf {
     }
 }
 
-fn clone_repo_to_temp(url: &str) -> Result<PathBuf> {
+fn clone_repo_to_temp(url: &str, history: bool) -> Result<PathBuf> {
     let tmp = clone_dir(url);
     if tmp.join(".git").exists() {
         eprintln!("refreshing {} in {}", url, tmp.display());
-        run_git(&tmp, &["fetch", "--depth", "1", "origin", "HEAD"])?;
+        let shallow = run_git(&tmp, &["rev-parse", "--is-shallow-repository"])? == "true";
+        let mut fetch = vec!["fetch"];
+        if shallow {
+            if history {
+                fetch.push("--unshallow");
+            } else {
+                fetch.extend(["--depth", "1"]);
+            }
+        }
+        fetch.extend(["origin", "HEAD"]);
+        run_git(&tmp, &fetch)?;
         run_git(&tmp, &["reset", "--hard", "FETCH_HEAD"])?;
         return Ok(tmp);
     }
     eprintln!("cloning {} → {}", url, tmp.display());
-    let out = ProcessCommand::new("git")
-        .args(["clone", "--depth", "1", url])
+    let mut clone = ProcessCommand::new("git");
+    clone.args(["clone", "--single-branch"]);
+    if !history {
+        clone.args(["--depth", "1"]);
+    }
+    let out = clone
+        .arg(url)
         .arg(&tmp)
         .env_remove("GITHUB_TOKEN") // Avoid PAT auth failures on public repos
         .output()
@@ -3110,7 +3125,7 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
     let uri = expand_uri(&args.path);
     let mut source_commit = None;
     let root = if is_url(&uri) {
-        let dir = clone_repo_to_temp(&uri)?;
+        let dir = clone_repo_to_temp(&uri, args.git)?;
         source_commit = Some(run_git(&dir, &["rev-parse", "HEAD"])?);
         dir
     } else {
@@ -3121,6 +3136,10 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
             p
         }
     };
+
+    if args.git && run_git(&root, &["rev-parse", "--is-shallow-repository"])? == "true" {
+        anyhow::bail!("Git activity requires complete history. Run git fetch --unshallow in the checkout or omit --git for a structural scan.");
+    }
 
     // Determine ecosystem(s) to analyze.
     let mut unscanned = Vec::new();
@@ -3159,9 +3178,9 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
         .map(|(_, files)| rust_package_roots(&root, files))
         .unwrap_or_default();
     let cache_dir = root.join("evals/pkgrank/files_cache");
-    let cache_key = args
-        .cache
-        .then(|| files_cache_key(&file_groups, &rust_packages, args));
+    // File timestamps cannot establish that the Git history or time window is unchanged.
+    let cache_key =
+        (args.cache && !args.git).then(|| files_cache_key(&file_groups, &rust_packages, args));
     if let Some(key) = cache_key {
         if let Some(mut cached) = files_cache_read(&cache_dir, key) {
             cached.source_commit = source_commit;
@@ -4348,9 +4367,9 @@ mod remote_clone_tests {
         std::fs::write(origin.path().join("a.txt"), "one\n").unwrap();
         git(origin.path(), &["add", "."]);
         git(origin.path(), &["commit", "-q", "-m", "one"]);
-        let url = origin.path().to_string_lossy().to_string();
+        let url = format!("file://{}", origin.path().display());
 
-        let first = clone_repo_to_temp(&url).unwrap();
+        let first = clone_repo_to_temp(&url, false).unwrap();
         let first_head = git(&first, &["rev-parse", "HEAD"]);
 
         std::fs::write(origin.path().join("a.txt"), "two\n").unwrap();
@@ -4360,7 +4379,12 @@ mod remote_clone_tests {
 
         // A second analysis of the same URL must see the new commit, not the
         // clone left behind by the first run.
-        let second = clone_repo_to_temp(&url).unwrap();
+        assert_eq!(
+            git(&first, &["rev-parse", "--is-shallow-repository"]),
+            "true"
+        );
+        let second = clone_repo_to_temp(&url, true).unwrap();
+        assert_eq!(git(&second, &["rev-list", "--count", "HEAD"]), "2");
         assert_eq!(second, first);
         assert_eq!(git(&second, &["rev-parse", "HEAD"]), new_head);
         assert_eq!(
