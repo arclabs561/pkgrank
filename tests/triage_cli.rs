@@ -1,5 +1,6 @@
 use assert_cmd::cargo::cargo_bin_cmd;
 
+#[cfg(feature = "stdio")]
 fn write_file(path: &std::path::Path, contents: &str) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).unwrap();
@@ -7,6 +8,17 @@ fn write_file(path: &std::path::Path, contents: &str) {
     std::fs::write(path, contents).unwrap();
 }
 
+#[cfg(not(feature = "stdio"))]
+#[test]
+fn triage_cli_explains_required_feature() {
+    cargo_bin_cmd!("pkgrank")
+        .arg("triage")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("triage requires feature `stdio`"));
+}
+
+#[cfg(feature = "stdio")]
 #[test]
 fn triage_cli_reads_artifacts_without_refresh() {
     let mut root = std::env::temp_dir();

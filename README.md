@@ -96,6 +96,10 @@ tracked nested project uses another ecosystem, text output gives a command to
 scan it from that root. JSON lists its `ecosystem` and relative `manifest` in
 `unscanned_projects`. An explicit `--ecosystem` suppresses these hints.
 
+`files --git` needs commit history to count file changes and contributors. URL scans
+fetch the default branch history. For a shallow local checkout, run
+`git fetch --unshallow` first. Structural scans work with shallow checkouts.
+
 By default it stores each run in a local SQLite database for
 `pkgrank query`; pass `--store false` to skip that.
 

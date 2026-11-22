@@ -450,6 +450,12 @@ pub(crate) struct PkgrankUpgradePriorityToolArgs {
     /// Include build-dependencies.
     #[serde(default)]
     pub build: Option<bool>,
+    /// Existing cargo-outdated JSON report to rank without querying for updates.
+    #[serde(default)]
+    pub outdated_report: Option<String>,
+    /// Cargo features to enable in both the upgrade report and resolved graph.
+    #[serde(default)]
+    pub features: Vec<String>,
     /// Restrict graph to workspace members.
     #[serde(default)]
     pub workspace_only: Option<bool>,
@@ -1390,7 +1396,9 @@ impl PkgrankStdioMcpFull {
             path: PathBuf::from(params.0.path.as_deref().unwrap_or(".")),
             dev: params.0.dev.unwrap_or(false),
             build: params.0.build.unwrap_or(false),
-            workspace_only: params.0.workspace_only.unwrap_or(true),
+            outdated_report: params.0.outdated_report.as_ref().map(PathBuf::from),
+            features: params.0.features.clone(),
+            workspace_only: params.0.workspace_only.unwrap_or(false),
             top: params.0.top.unwrap_or(20),
             format: OutputFormat::Json,
             cache: false,

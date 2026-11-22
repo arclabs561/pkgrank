@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 
@@ -21,8 +21,16 @@ pub(crate) struct UpgradePriorityArgs {
     #[arg(long)]
     pub build: bool,
 
-    /// Restrict graph to workspace members.
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    /// Rank an existing cargo-outdated JSON report instead of querying for updates again.
+    #[arg(long)]
+    pub outdated_report: Option<PathBuf>,
+
+    /// Enable Cargo features in both the upgrade report and the resolved graph.
+    #[arg(long, value_delimiter = ',')]
+    pub features: Vec<String>,
+
+    /// Restrict graph to workspace members (external dependencies are normally ranked).
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
     pub workspace_only: bool,
 
     /// Top-N results.
@@ -44,11 +52,11 @@ pub(crate) struct UpgradePriorityArgs {
 
 #[derive(Debug, Deserialize)]
 struct CargoOutdatedOutput {
+    crate_name: Option<String>,
     dependencies: Vec<OutdatedDep>,
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct OutdatedDep {
     name: String,
     project: String,
@@ -57,9 +65,42 @@ struct OutdatedDep {
     kind: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum GraphMatch {
+    Matched,
+    OutsideGraph,
+    Ambiguous,
+}
+
+#[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Serialize)]
+struct ReportedVia {
+    workspace_member: Option<String>,
+    dependency: String,
+    compat_version: String,
+    latest_version: String,
+}
+
+#[derive(Ord, PartialOrd, Eq, PartialEq)]
+struct Upgrade {
+    name: String,
+    current: String,
+    target: String,
+}
+
+fn target_version(current: &str, compat: &str, latest: &str) -> Option<String> {
+    [latest, compat]
+        .into_iter()
+        .find(|v| *v != current && !matches!(*v, "---" | "Removed"))
+        .map(str::to_owned)
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct UpgradePriorityRow {
     pub name: String,
+    reported_via: BTreeSet<ReportedVia>,
+    target_version: String,
+    graph_match: GraphMatch,
     pub current_version: String,
     pub compat_version: String,
     pub latest_version: String,
@@ -73,7 +114,14 @@ pub(crate) struct UpgradePriorityRow {
 pub(crate) fn compute_upgrade_priority(
     args: &UpgradePriorityArgs,
 ) -> Result<(usize, Vec<UpgradePriorityRow>)> {
-    let outdated = run_cargo_outdated(&args.path)?;
+    let outdated = match &args.outdated_report {
+        Some(path) => {
+            let file =
+                std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+            parse_outdated(std::io::BufReader::new(file))?
+        }
+        None => run_cargo_outdated(&args.path, &args.features)?,
+    };
 
     // 2. Build graph analysis.
     let analyze = AnalyzeArgs {
@@ -86,7 +134,7 @@ pub(crate) fn compute_upgrade_priority(
         workspace_only: args.workspace_only,
         all_features: false,
         no_default_features: false,
-        features: None,
+        features: Some(args.features.join(",")).filter(|s| !s.is_empty()),
         format: OutputFormat::Json,
         stats: false,
         json_limit: None,
@@ -95,15 +143,19 @@ pub(crate) fn compute_upgrade_priority(
     };
     let (rows, _convergence) = analyze_rows_with_convergence(&analyze)?;
 
-    // Build lookup by crate name.
-    let row_by_name: HashMap<&str, &Row> = rows.iter().map(|r| (r.name.as_str(), r)).collect();
+    // Cargo can resolve several versions or sources of one crate in a graph.
+    let mut versions: HashMap<(&str, &str), Vec<&Row>> = HashMap::new();
+    for row in &rows {
+        versions
+            .entry((&row.name, &row.version))
+            .or_default()
+            .push(row);
+    }
 
     // Compute reachability for dependents count.
     let mpath = manifest_path(&analyze.path)?;
     let metadata = metadata_for(&mpath, &analyze)?;
-    let (graph, node_map) = build_graph(&metadata, &analyze)?;
-    let pkg_by_id: HashMap<&cargo_metadata::PackageId, &cargo_metadata::Package> =
-        metadata.packages.iter().map(|p| (&p.id, p)).collect();
+    let (graph, _) = build_graph(&metadata, &analyze)?;
 
     let edge_pairs: Vec<(usize, usize)> = graph
         .edge_references()
@@ -111,27 +163,55 @@ pub(crate) fn compute_upgrade_priority(
         .collect();
     let (dependents, _deps) = graphops::reachability_counts_edges(graph.node_count(), &edge_pairs);
 
-    // Build name -> dependents lookup.
-    let mut dependents_by_name: HashMap<String, usize> = HashMap::new();
-    for (id, &idx) in &node_map {
-        if let Some(pkg) = pkg_by_id.get(id) {
-            dependents_by_name.insert(pkg.name.to_string(), dependents[idx.index()]);
+    let by_id: HashMap<_, _> = graph
+        .node_indices()
+        .map(|idx| (graph[idx].repr.as_str(), dependents[idx.index()]))
+        .collect();
+
+    let outdated_count = outdated
+        .iter()
+        .map(|report| report.dependencies.len())
+        .sum();
+    let mut upgrades: BTreeMap<Upgrade, BTreeSet<ReportedVia>> = BTreeMap::new();
+    for report in outdated {
+        for dep in report.dependencies {
+            if (!args.dev && dep.kind.as_deref() == Some("Development"))
+                || (!args.build && dep.kind.as_deref() == Some("Build"))
+            {
+                continue;
+            }
+            // cargo-outdated labels a transitive dependency as parent->crate.
+            let name = dep.name.rsplit("->").next().unwrap_or(&dep.name).to_owned();
+            let Some(target) = target_version(&dep.project, &dep.compat, &dep.latest) else {
+                continue;
+            };
+            let upgrade = Upgrade {
+                name,
+                current: dep.project,
+                target,
+            };
+            upgrades.entry(upgrade).or_default().insert(ReportedVia {
+                workspace_member: report.crate_name.clone(),
+                dependency: dep.name,
+                compat_version: dep.compat,
+                latest_version: dep.latest,
+            });
         }
     }
-
-    // 3. Join and score.
-    let mut priority_rows: Vec<UpgradePriorityRow> = Vec::new();
-    for dep in &outdated {
-        if dep.latest == dep.project || dep.latest == "---" {
-            continue;
-        }
-        let pr = row_by_name
-            .get(dep.name.as_str())
-            .map(|r| r.pagerank)
-            .unwrap_or(0.0);
-        let trans_deps = dependents_by_name.get(&dep.name).copied().unwrap_or(0);
-
-        let urgency = version_urgency(&dep.project, &dep.latest);
+    let mut priority_rows = Vec::new();
+    for (upgrade, reported_via) in upgrades {
+        let candidates = versions
+            .get(&(upgrade.name.as_str(), upgrade.current.as_str()))
+            .map(Vec::as_slice);
+        let (graph_match, pr, trans_deps) = match candidates {
+            Some([row]) => match by_id.get(row.id.as_str()) {
+                Some(&reach) => (GraphMatch::Matched, row.pagerank, reach),
+                None => (GraphMatch::OutsideGraph, 0.0, 0),
+            },
+            Some(_) => (GraphMatch::Ambiguous, 0.0, 0),
+            None => (GraphMatch::OutsideGraph, 0.0, 0),
+        };
+        let urgency = version_urgency(&upgrade.current, &upgrade.target);
         let urgency_bonus = match urgency.as_str() {
             "major" => 10.0,
             "minor" => 5.0,
@@ -140,20 +220,39 @@ pub(crate) fn compute_upgrade_priority(
 
         let score = 10.0 * ((trans_deps as f64) + 1.0).ln() + 1000.0 * pr + urgency_bonus;
 
+        // Preserve the legacy version fields from one actual path. Prefer a path
+        // where the target is the latest version; every observation is in reported_via.
+        let example = reported_via
+            .iter()
+            .max_by_key(|path| {
+                (
+                    path.latest_version == upgrade.target,
+                    path.compat_version == upgrade.target,
+                )
+            })
+            .expect("each upgrade has a reporting path");
         priority_rows.push(UpgradePriorityRow {
-            name: dep.name.clone(),
-            current_version: dep.project.clone(),
-            compat_version: dep.compat.clone(),
-            latest_version: dep.latest.clone(),
+            name: upgrade.name,
+            target_version: upgrade.target,
+            graph_match,
+            current_version: upgrade.current,
+            compat_version: example.compat_version.clone(),
+            latest_version: example.latest_version.clone(),
+            reported_via,
             pagerank: pr,
             transitive_dependents: trans_deps,
             priority_score: score,
             upgrade_urgency: urgency,
         });
     }
-
-    priority_rows.sort_by(|a, b| b.priority_score.total_cmp(&a.priority_score));
-    let outdated_count = outdated.len();
+    priority_rows.sort_by(|a, b| {
+        (b.graph_match == GraphMatch::Matched)
+            .cmp(&(a.graph_match == GraphMatch::Matched))
+            .then_with(|| b.priority_score.total_cmp(&a.priority_score))
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.current_version.cmp(&b.current_version))
+            .then_with(|| a.target_version.cmp(&b.target_version))
+    });
     if args.top > 0 {
         priority_rows.truncate(args.top);
     }
@@ -188,17 +287,21 @@ pub(crate) fn run_upgrade_priority(args: &UpgradePriorityArgs) -> Result<()> {
             println!("upgrade-priority  ({} outdated)\n", outdated_count);
             println!(
                 "{:>4}  {:<20} {:>10} {:>10} {:>10} {:>7} {:>8} {:>5}  pr",
-                "rank", "name", "current", "compat", "latest", "urgency", "priority", "deps"
+                "rank", "name", "current", "compat", "target", "urgency", "priority", "deps"
             );
             println!("{:\u{2500}<105}", "");
             for (i, r) in priority_rows.iter().enumerate() {
                 println!(
                     "{:>4}. {:<20} {:>10} {:>10} {:>10} {:>7} {:>8.1} {:>5}  {:.4}",
                     i + 1,
-                    r.name,
+                    match r.graph_match {
+                        GraphMatch::Matched => r.name.clone(),
+                        GraphMatch::OutsideGraph => format!("{} (outside graph)", r.name),
+                        GraphMatch::Ambiguous => format!("{} (ambiguous source)", r.name),
+                    },
                     r.current_version,
                     r.compat_version,
-                    r.latest_version,
+                    r.target_version,
                     r.upgrade_urgency,
                     r.priority_score,
                     r.transitive_dependents,
@@ -210,39 +313,46 @@ pub(crate) fn run_upgrade_priority(args: &UpgradePriorityArgs) -> Result<()> {
     Ok(())
 }
 
-fn run_cargo_outdated(path: &Path) -> Result<Vec<OutdatedDep>> {
+fn run_cargo_outdated(path: &Path, features: &[String]) -> Result<Vec<CargoOutdatedOutput>> {
     let manifest = if path.is_dir() {
         path.join("Cargo.toml")
     } else {
         path.to_path_buf()
     };
 
-    let out = ProcessCommand::new("cargo")
-        .args([
-            "outdated",
-            "--format",
-            "json",
-            "--manifest-path",
-            &manifest.to_string_lossy(),
-        ])
-        .output();
+    // cargo-outdated compares workspace root paths literally for some feature sets.
+    let manifest = manifest
+        .canonicalize()
+        .with_context(|| format!("opening {}", manifest.display()))?;
+    let mut cmd = ProcessCommand::new("cargo");
+    cmd.args(["outdated", "--format", "json", "--manifest-path"])
+        .arg(manifest);
+    if !features.is_empty() {
+        cmd.arg("--features").arg(features.join(","));
+    }
 
-    match out {
+    match cmd.output() {
         Ok(output) => {
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 return Err(anyhow!("cargo outdated failed: {}", stderr.trim()));
             }
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let parsed: CargoOutdatedOutput = serde_json::from_str(&stdout)
-                .with_context(|| "failed to parse cargo outdated JSON output")?;
-            Ok(parsed.dependencies)
+            parse_outdated(output.stdout.as_slice())
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(anyhow!(
             "cargo-outdated not found. Install with: cargo install cargo-outdated"
         )),
         Err(e) => Err(anyhow!("failed to run cargo outdated: {}", e)),
     }
+}
+
+fn parse_outdated(reader: impl std::io::Read) -> Result<Vec<CargoOutdatedOutput>> {
+    let reports = serde_json::Deserializer::from_reader(reader)
+        .into_iter::<CargoOutdatedOutput>()
+        .collect::<Result<Vec<_>, _>>()
+        .context("failed to parse cargo outdated JSON output")?;
+    anyhow::ensure!(!reports.is_empty(), "cargo outdated returned no report");
+    Ok(reports)
 }
 
 fn version_urgency(current: &str, latest: &str) -> String {
