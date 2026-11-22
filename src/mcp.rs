@@ -420,7 +420,7 @@ pub(crate) struct PkgrankPprSummaryToolArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct PkgrankBlastRadiusToolArgs {
-    /// Package name to analyze (e.g. "serde").
+    /// Package name or name@version. Cargo also accepts a full package ID.
     pub package: String,
     /// Path to Cargo.toml or directory.
     #[serde(default)]
