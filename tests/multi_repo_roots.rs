@@ -44,8 +44,8 @@ fn view_local_merges_standalone_repo_roots() {
 
     // Repo 3: lives one level down inside an umbrella dir (no Cargo.toml at
     // the umbrella level), like `infra/<repo>` layouts.
-    write(&root.join("um/libu/Cargo.toml"), &lib_manifest("libu"));
-    write(&root.join("um/libu/src/lib.rs"), "pub fn u() {}\n");
+    write(&root.join("_group/libu/Cargo.toml"), &lib_manifest("libu"));
+    write(&root.join("_group/libu/src/lib.rs"), "pub fn u() {}\n");
 
     let out_dir = root.join("evals/pkgrank");
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("pkgrank"));
@@ -84,6 +84,9 @@ fn view_local_merges_standalone_repo_roots() {
         names.contains(&"libu"),
         "umbrella repo libu missing from tlc: {names:?}"
     );
+
+    let libu = rows.iter().find(|r| r["name"] == "libu").unwrap();
+    assert_eq!(libu["repo"], "_group/libu");
 
     let liba = rows.iter().find(|r| r["name"] == "liba").unwrap();
     assert_eq!(

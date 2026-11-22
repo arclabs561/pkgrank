@@ -94,6 +94,12 @@ and docs by default.
 More commands and configuration are documented in
 [`docs/commands.md`](docs/commands.md).
 
+For a directory of Cargo projects, `pkgrank view --root . --mode local`
+discovers manifests directly below the root and one level inside grouping
+directories. Repository labels are paths relative to the scan root. Git
+checkouts and worktrees keep their own labels, and workspace members in
+source archives are grouped under their outermost manifest.
+
 ## Output
 
 TTY output is text. Piped output is JSON unless `--format text` is set.

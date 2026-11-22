@@ -1465,9 +1465,8 @@ fn semver_incompatible(a: &str, b: &str) -> bool {
 
 /// Repo roots under a super-workspace root: immediate subdirectories that
 /// contain a `Cargo.toml`, plus one level deeper under umbrella directories
-/// (subdirectories without their own `Cargo.toml`). Hidden and `_`-prefixed
-/// directories are skipped at both levels, matching the sweep-local
-/// convention (`_archive/`, `_forks/`, etc. are not first-party).
+/// (subdirectories without their own `Cargo.toml`). Hidden directories
+/// are skipped at both levels.
 pub(crate) fn discover_repo_roots(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for entry in fs::read_dir(root).with_context(|| format!("failed to read {}", root.display()))? {
@@ -1478,7 +1477,7 @@ pub(crate) fn discover_repo_roots(root: &Path) -> Result<Vec<PathBuf>> {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') || name.starts_with('_') {
+        if name.starts_with('.') {
             continue;
         }
         let dir = entry.path();
@@ -1492,7 +1491,7 @@ pub(crate) fn discover_repo_roots(root: &Path) -> Result<Vec<PathBuf>> {
         };
         for child in children.flatten() {
             let cname = child.file_name().to_string_lossy().to_string();
-            if cname.starts_with('.') || cname.starts_with('_') {
+            if cname.starts_with('.') {
                 continue;
             }
             let cdir = child.path();
@@ -2564,9 +2563,6 @@ fn compute_tlc_crates(root: &Path, out_dir: &Path) -> Result<Vec<TlcCrateRow>> {
             why_bits.push("moderate centrality/complexity".to_string());
         }
 
-        // Infer repo from manifest_path.
-        // The "super-workspace" contains nested repo layouts; special-case `_mcp/*` so those
-        // crates become their own repos (e.g. `_mcp/axum-mcp` -> repo `axum-mcp`).
         let repo = infer_repo_for_manifest(root, &r.manifest_path);
         let axis = token_axis
             .get(&r.name)
@@ -5320,24 +5316,31 @@ fn readme_details_html(root: &Path, readme_path: Option<PathBuf>) -> String {
 }
 
 fn infer_repo_for_manifest(root: &Path, manifest_path: &str) -> String {
-    let mp = Path::new(manifest_path);
-    let rel = mp.strip_prefix(root).unwrap_or(mp);
-    let mut it = rel.components();
-    let first = it
-        .next()
-        .map(|c| c.as_os_str().to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    let manifest = Path::new(manifest_path);
+    let Ok(relative) = manifest.strip_prefix(root) else {
+        return "unknown".to_string();
+    };
 
-    // Treat `_<prefix>/*` directories as umbrella dirs: use the second path
-    // component as the repo name (e.g. `_mcp/axum-mcp` -> `axum-mcp`).
-    if first.starts_with('_') {
-        if let Some(second) = it.next() {
-            return second.as_os_str().to_string_lossy().to_string();
+    // Cargo exports may lack Git metadata. In that case use the outermost
+    // manifest directory under the scan root so workspace members stay together.
+    let mut package_root = None;
+    for dir in relative.ancestors().skip(1) {
+        let path = root.join(dir);
+        if path.join("Cargo.toml").is_file() {
+            package_root = Some(dir);
         }
-        return first.trim_start_matches('_').to_string();
+        if path.join(".git").exists() {
+            package_root = Some(dir);
+            break;
+        }
     }
-
-    first
+    match package_root {
+        Some(dir) if dir.as_os_str().is_empty() => ".".to_string(),
+        Some(dir) => dir
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/"),
+        None => "unknown".to_string(),
+    }
 }
 
 fn render_repo_scatter_svg(rows: &[RepoRow]) -> String {
