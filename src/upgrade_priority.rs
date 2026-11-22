@@ -21,6 +21,14 @@ pub(crate) struct UpgradePriorityArgs {
     #[arg(long)]
     pub build: bool,
 
+    /// Rank an existing cargo-outdated JSON report instead of querying for updates again.
+    #[arg(long)]
+    pub outdated_report: Option<PathBuf>,
+
+    /// Enable Cargo features in both the upgrade report and the resolved graph.
+    #[arg(long, value_delimiter = ',')]
+    pub features: Vec<String>,
+
     /// Restrict graph to workspace members (external dependencies are normally ranked).
     #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
     pub workspace_only: bool,
@@ -106,7 +114,14 @@ pub(crate) struct UpgradePriorityRow {
 pub(crate) fn compute_upgrade_priority(
     args: &UpgradePriorityArgs,
 ) -> Result<(usize, Vec<UpgradePriorityRow>)> {
-    let outdated = run_cargo_outdated(&args.path)?;
+    let outdated = match &args.outdated_report {
+        Some(path) => {
+            let file =
+                std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+            parse_outdated(std::io::BufReader::new(file))?
+        }
+        None => run_cargo_outdated(&args.path, &args.features)?,
+    };
 
     // 2. Build graph analysis.
     let analyze = AnalyzeArgs {
@@ -119,7 +134,7 @@ pub(crate) fn compute_upgrade_priority(
         workspace_only: args.workspace_only,
         all_features: false,
         no_default_features: false,
-        features: None,
+        features: Some(args.features.join(",")).filter(|s| !s.is_empty()),
         format: OutputFormat::Json,
         stats: false,
         json_limit: None,
@@ -298,41 +313,46 @@ pub(crate) fn run_upgrade_priority(args: &UpgradePriorityArgs) -> Result<()> {
     Ok(())
 }
 
-fn run_cargo_outdated(path: &Path) -> Result<Vec<CargoOutdatedOutput>> {
+fn run_cargo_outdated(path: &Path, features: &[String]) -> Result<Vec<CargoOutdatedOutput>> {
     let manifest = if path.is_dir() {
         path.join("Cargo.toml")
     } else {
         path.to_path_buf()
     };
 
-    let out = ProcessCommand::new("cargo")
-        .args([
-            "outdated",
-            "--format",
-            "json",
-            "--manifest-path",
-            &manifest.to_string_lossy(),
-        ])
-        .output();
+    // cargo-outdated compares workspace root paths literally for some feature sets.
+    let manifest = manifest
+        .canonicalize()
+        .with_context(|| format!("opening {}", manifest.display()))?;
+    let mut cmd = ProcessCommand::new("cargo");
+    cmd.args(["outdated", "--format", "json", "--manifest-path"])
+        .arg(manifest);
+    if !features.is_empty() {
+        cmd.arg("--features").arg(features.join(","));
+    }
 
-    match out {
+    match cmd.output() {
         Ok(output) => {
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 return Err(anyhow!("cargo outdated failed: {}", stderr.trim()));
             }
-            let reports = serde_json::Deserializer::from_slice(&output.stdout)
-                .into_iter::<CargoOutdatedOutput>()
-                .collect::<Result<Vec<_>, _>>()
-                .context("failed to parse cargo outdated JSON output")?;
-            anyhow::ensure!(!reports.is_empty(), "cargo outdated returned no report");
-            Ok(reports)
+            parse_outdated(output.stdout.as_slice())
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(anyhow!(
             "cargo-outdated not found. Install with: cargo install cargo-outdated"
         )),
         Err(e) => Err(anyhow!("failed to run cargo outdated: {}", e)),
     }
+}
+
+fn parse_outdated(reader: impl std::io::Read) -> Result<Vec<CargoOutdatedOutput>> {
+    let reports = serde_json::Deserializer::from_reader(reader)
+        .into_iter::<CargoOutdatedOutput>()
+        .collect::<Result<Vec<_>, _>>()
+        .context("failed to parse cargo outdated JSON output")?;
+    anyhow::ensure!(!reports.is_empty(), "cargo outdated returned no report");
+    Ok(reports)
 }
 
 fn version_urgency(current: &str, latest: &str) -> String {

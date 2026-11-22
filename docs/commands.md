@@ -97,13 +97,24 @@ pkgrank upgrade-priority -n 15
 pkgrank upgrade-priority --format json | jq '.rows[:5]'
 ```
 
-Requires `cargo-outdated`. The default graph includes external packages.
+Live queries require `cargo-outdated`. The default graph includes external packages.
 Each row matches the installed name and version. Reports for the same installed version and target share one row. `reported_via`
 retains each member, dependency path, and its compatible and latest versions.
 `target_version` uses the compatible update when the latest graph removes the
 package. Rows with no upgrade version are omitted. `graph_match` distinguishes `matched`, `outside_graph`, and
 `ambiguous` (multiple sources for that version). Unmatched rows sort last.
-Use `--dev` or `--build` to include those dependency kinds.
+Use `--dev` or `--build` to include those dependency kinds. For optional
+dependencies, `--features pipeline,storage` selects the same features for both
+Cargo metadata and the upgrade report.
+
+To compare graph configurations against a fixed set of available updates, pass
+`--outdated-report updates.json` from `cargo outdated --format json`. This
+ranks only the observations in that file. Cargo still resolves the selected
+graph. For example:
+
+```bash
+pkgrank upgrade-priority . --outdated-report updates.json --features pipeline
+```
 
 ## Architecture Rules
 

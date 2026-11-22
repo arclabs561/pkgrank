@@ -28,9 +28,20 @@ fn ranks_resolved_versions_and_rejects_incomplete_member_output() {
         "0.1.0",
         "common = { path = '../v1' }\nmiddle = { path = '../middle' }",
     );
+    package(&dir.join("opt"), "extra", "1.0.0", "");
+    let manifest = dir.join("app/Cargo.toml");
+    let mut toml = fs::read_to_string(&manifest).unwrap();
+    toml.push_str(
+        "\nextra = { path = '../opt', optional = true }\n[features]\npipeline = ['dep:extra']\n",
+    );
+    fs::write(manifest, toml).unwrap();
     // Cargo resolves the actual packages. Only the available upgrade versions are fixtures.
     let shim = dir.join("cargo-outdated");
-    fs::write(&shim, "#!/bin/sh\ncat \"$UPGRADE_FIXTURE\"\n").unwrap();
+    fs::write(
+        &shim,
+        "#!/bin/sh\necho \"$@\" > \"$UPGRADE_ARGS\"\ncat \"$UPGRADE_FIXTURE\"\n",
+    )
+    .unwrap();
     fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
     let fixture = dir.join("out.json");
     let path = env::join_paths(
@@ -40,10 +51,11 @@ fn ranks_resolved_versions_and_rejects_incomplete_member_output() {
     let cmd = || {
         let mut c = cargo_bin_cmd!("pkgrank");
         c.env("PATH", &path)
+            .env("UPGRADE_ARGS", dir.join("args"))
             .env("UPGRADE_FIXTURE", &fixture)
             .env("CARGO_NET_OFFLINE", "true")
             .args(["upgrade-priority", "--format", "json"])
-            .arg(dir.join("app"));
+            .arg(dir.join("v1/../app"));
         c
     };
     let dep = |name: &str, project: &str, compat: &str, latest: &str| json!({"name":name, "project":project, "compat":compat, "latest":latest, "kind":"Normal"});
@@ -80,6 +92,40 @@ fn ranks_resolved_versions_and_rejects_incomplete_member_output() {
         .unwrap()
         .iter()
         .all(|r| r["graph_match"] == "outside_graph"));
+    let optional =
+        json!({"crate_name":"app", "dependencies":[dep("extra","1.0.0","1.0.1","1.0.1")]});
+    fs::write(&fixture, optional.to_string()).unwrap();
+    let plain = cmd().assert().success().get_output().stdout.clone();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&plain).unwrap()["rows"][0]["graph_match"],
+        "outside_graph"
+    );
+    let enabled = cmd()
+        .args(["--features", "pipeline"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&enabled).unwrap()["rows"][0]["transitive_dependents"],
+        1
+    );
+    let args = fs::read_to_string(dir.join("args")).unwrap();
+    assert!(args.contains("--features pipeline"));
+    assert!(!args.contains("/../"));
+    // Replay the same observations against the feature graph without calling cargo-outdated.
+    fs::remove_file(dir.join("args")).unwrap();
+    let replay = cmd()
+        .args(["--features", "pipeline", "--outdated-report"])
+        .arg(&fixture)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(replay, enabled);
+    assert!(!dir.join("args").exists());
     for bad in [String::new(), format!("{first}\n{{")] {
         fs::write(&fixture, bad).unwrap();
         cmd().assert().failure();
