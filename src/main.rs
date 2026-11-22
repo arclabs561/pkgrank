@@ -72,7 +72,7 @@ use graphops::{
 };
 
 #[derive(Parser, Debug)]
-#[command(name = "pkgrank")]
+#[command(name = "pkgrank", version)]
 #[command(about = "Dependency graph centrality analysis (Cargo, npm, Python, Go)")]
 struct Cli {
     #[command(subcommand)]
