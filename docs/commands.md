@@ -194,3 +194,11 @@ Toolset selection:
 - default: slim tool surface
 - `PKGRANK_MCP_TOOLSET=full`: module graph, file analysis, and ecosystem tools
 - `PKGRANK_MCP_TOOLSET=debug`: internal artifact-inspection tools
+
+From a source checkout, run the MCP example to start real servers and call their
+tools over stdio. It checks the slim, full, and debug toolsets and exits after
+validating their responses.
+
+```bash
+cargo run --locked --example mcp_smoke
+```

@@ -3,33 +3,22 @@
 //! This starts a child process running `pkgrank mcp-stdio` and calls a few tools.
 //! It’s meant to validate the MCP surface without relying on Cursor as the client.
 
-#[cfg(not(feature = "stdio"))]
-fn main() {
-    eprintln!("mcp_smoke requires `--features stdio` (or default features enabled)");
-}
-
-#[cfg(feature = "stdio")]
+use anyhow::Context;
+use cargo_metadata::Message;
 use rmcp::{
     model::CallToolRequestParams,
     service::ServiceExt,
     transport::{ConfigureCommandExt, TokioChildProcess},
 };
-#[cfg(feature = "stdio")]
-// keep serde_json in scope for json! macro usage
-use serde_json as _;
-#[cfg(feature = "stdio")]
 use serde_json::Value;
-#[cfg(feature = "stdio")]
 use std::path::{Path, PathBuf};
-#[cfg(feature = "stdio")]
+use std::process::Stdio;
 use tokio::process::Command;
 
-#[cfg(feature = "stdio")]
 fn tool_names(tools: &rmcp::model::ListToolsResult) -> Vec<String> {
     tools.tools.iter().map(|t| t.name.to_string()).collect()
 }
 
-#[cfg(feature = "stdio")]
 fn assert_toolset(toolset: &str, names: &[String]) -> anyhow::Result<()> {
     let mut missing = Vec::new();
     for required in [
@@ -110,7 +99,6 @@ fn assert_toolset(toolset: &str, names: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "stdio")]
 fn extract_wrapped_json(tool: &str, call: &rmcp::model::CallToolResult) -> anyhow::Result<Value> {
     let texts: Vec<&str> = call
         .content
@@ -139,7 +127,6 @@ fn extract_wrapped_json(tool: &str, call: &rmcp::model::CallToolResult) -> anyho
     Ok(v)
 }
 
-#[cfg(feature = "stdio")]
 async fn spawn_and_check(bin: &Path, root: &Path, out: &Path, toolset: &str) -> anyhow::Result<()> {
     eprintln!(
         "spawning: {} mcp-stdio (toolset={})",
@@ -212,20 +199,33 @@ async fn spawn_and_check(bin: &Path, root: &Path, out: &Path, toolset: &str) -> 
     Ok(())
 }
 
-#[cfg(feature = "stdio")]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let pkgrank_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let bin = pkgrank_root.join("target/debug/pkgrank");
-    // Ensure the server binary exists *and* matches current sources/features.
-    // (The example itself can compile without rebuilding the pkgrank binary.)
-    let status = Command::new("cargo")
+    // An example build does not compile the server. Ask Cargo for the executable
+    // it produced so target-directory overrides and platform suffixes work.
+    let build = Command::new("cargo")
         .current_dir(&pkgrank_root)
-        .args(["build", "--features", "stdio"])
-        .status()
+        .args([
+            "build",
+            "--bin",
+            "pkgrank",
+            "--features",
+            "stdio",
+            "--message-format=json-render-diagnostics",
+        ])
+        .stderr(Stdio::inherit())
+        .output()
         .await?;
-    anyhow::ensure!(status.success(), "cargo build --features stdio failed");
-    anyhow::ensure!(bin.exists(), "expected pkgrank binary at {}", bin.display());
+    anyhow::ensure!(build.status.success(), "could not build the MCP server");
+    let bin = Message::parse_stream(build.stdout.as_slice())
+        .find_map(|message| match message.ok()? {
+            Message::CompilerArtifact(artifact) if artifact.target.name == "pkgrank" => {
+                artifact.executable.map(|path| path.into_std_path_buf())
+            }
+            _ => None,
+        })
+        .context("Cargo did not report the pkgrank executable")?;
 
     // Validate toolsets + schema wrapper contract.
     let out = tempfile::tempdir()?;
