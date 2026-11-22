@@ -170,3 +170,28 @@ fn rust_roles_are_relative_to_the_nearest_package() {
         "source"
     );
 }
+
+#[test]
+fn cached_files_follow_changed_imports_even_when_source_timestamps_are_preserved() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    fs::write(root.join("pyproject.toml"), "[project]\nname = 'app'\n").unwrap();
+    let source = root.join("app.py");
+    fs::write(&source, "import first\n").unwrap();
+    fs::write(root.join("first.py"), "").unwrap();
+    fs::write(root.join("other.py"), "").unwrap();
+    let original_time = source.metadata().unwrap().modified().unwrap();
+    let warm = files(root, &["--cache"]);
+    assert_eq!(warm["first.py"]["in_degree"], 1);
+
+    fs::write(&source, "import other\n").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&source)
+        .unwrap()
+        .set_modified(original_time)
+        .unwrap();
+    let cached = files(root, &["--cache"]);
+    assert_eq!(cached["other.py"]["in_degree"], 1);
+    assert_eq!(cached, files(root, &[]));
+}

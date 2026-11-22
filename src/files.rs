@@ -3207,15 +3207,15 @@ fn expand_uri(s: &str) -> String {
     s.to_string()
 }
 
-/// Compute a cache key from file paths + mtimes + analysis args.
-const FILES_CACHE_FORMAT_VERSION: u8 = 5;
+/// Compute a cache key from the source contents, package manifests and analysis options.
+const FILES_CACHE_FORMAT_VERSION: u8 = 6;
 const FILES_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 fn files_cache_key(
     file_groups: &[(Ecosystem, Vec<PathBuf>)],
     rust_packages: &BTreeSet<PathBuf>,
     args: &FilesArgs,
-) -> u64 {
+) -> Option<u64> {
     let mut material = format!(
         "cache_format={}\nv={}\necosystem={:?}\nmetric={:?}\ndir={}\ngit={}\ngit_days={}\ntests={}\nall={}\n",
         FILES_CACHE_FORMAT_VERSION,
@@ -3229,7 +3229,7 @@ fn files_cache_key(
         args.include_all,
     );
     for package in rust_packages {
-        let manifest = std::fs::read(package.join("Cargo.toml")).unwrap_or_default();
+        let manifest = std::fs::read(package.join("Cargo.toml")).ok()?;
         material.push_str(&format!(
             "rust_package={}:{}\n",
             package.display(),
@@ -3239,17 +3239,11 @@ fn files_cache_key(
     for (ecosystem, files) in file_groups {
         material.push_str(&format!("{ecosystem}\n"));
         for f in files {
-            let mtime = f
-                .metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            material.push_str(&format!("{}:{}\n", f.display(), mtime));
+            let bytes = std::fs::read(f).ok()?;
+            material.push_str(&format!("{}:{}\n", f.display(), fnv1a64(&bytes)));
         }
     }
-    fnv1a64(material.as_bytes())
+    Some(fnv1a64(material.as_bytes()))
 }
 
 fn files_cache_read(cache_dir: &Path, key: u64) -> Option<FilesResult> {
@@ -3346,9 +3340,12 @@ pub(crate) fn files_analyze(args: &FilesArgs) -> Result<FilesResult> {
         .map(|(_, files)| rust_package_roots(&root, files))
         .unwrap_or_default();
     let cache_dir = root.join("evals/pkgrank/files_cache");
-    // File timestamps cannot establish that the Git history or time window is unchanged.
-    let cache_key =
-        (args.cache && !args.git).then(|| files_cache_key(&file_groups, &rust_packages, args));
+    // Source contents cannot establish that the Git history or time window is unchanged.
+    let cache_key = if args.cache && !args.git {
+        files_cache_key(&file_groups, &rust_packages, args)
+    } else {
+        None
+    };
     if let Some(key) = cache_key {
         if let Some(mut cached) = files_cache_read(&cache_dir, key) {
             cached.source_commit = source_commit;
