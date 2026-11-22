@@ -524,12 +524,15 @@ fn parse_pyproject_toml(path: &Path) -> ParseResult {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn parse_go_mod_graph(path: &Path) -> ParseResult {
-    let output = if path.is_dir() || path.join("go.mod").exists() {
+    let module_manifest = path.is_file() && path.file_name().is_some_and(|name| name == "go.mod");
+    let output = if path.is_dir() || module_manifest {
         // Shell out to `go mod graph`.
         let dir = if path.is_dir() {
             path
         } else {
-            path.parent().unwrap_or(path)
+            path.parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(Path::new("."))
         };
         let out = ProcessCommand::new("go")
             .args(["mod", "graph"])

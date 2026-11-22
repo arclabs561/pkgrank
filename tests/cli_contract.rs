@@ -56,3 +56,43 @@ fn query_displays_unicode_project_paths() {
             .stdout(predicate::str::contains(suffix));
     }
 }
+
+#[test]
+fn package_inputs_select_the_ecosystem_from_the_named_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::write(root.join("Cargo.toml"), "").unwrap();
+    for (filename, contents, ecosystem) in [
+        (
+            "pyproject.toml",
+            "[project]\nname = 'client'\ndependencies = ['httpx']\n",
+            "python",
+        ),
+        (
+            "package.json",
+            r#"{"name":"client","dependencies":{"express":"5"}}"#,
+            "js",
+        ),
+        (
+            "package-lock.json",
+            r#"{"lockfileVersion":3,"packages":{"node_modules/express":{"version":"5.0.0"}}}"#,
+            "js",
+        ),
+        (
+            "uv.lock",
+            "[[package]]\nname = 'httpx'\nversion = '0.28.1'\n",
+            "python",
+        ),
+    ] {
+        let path = root.join(filename);
+        std::fs::write(&path, contents).unwrap();
+        let out = Command::new(assert_cmd::cargo::cargo_bin!("pkgrank"))
+            .arg(&path)
+            .assert()
+            .success();
+        let report: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+        assert_eq!(report["ecosystem"], ecosystem);
+        assert!(report["rows_total"].as_u64().unwrap() > 0);
+        std::fs::remove_file(path).unwrap();
+    }
+}

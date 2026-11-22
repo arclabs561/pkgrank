@@ -286,8 +286,17 @@ fn should_include(role: FileRole, args: &FilesArgs) -> bool {
 // ---------------------------------------------------------------------------
 
 #[allow(dead_code)]
-pub(crate) fn detect_ecosystem(dir: &Path) -> Option<Ecosystem> {
-    detect_all_ecosystems(dir).into_iter().next()
+pub(crate) fn detect_ecosystem(path: &Path) -> Option<Ecosystem> {
+    if path.is_file() {
+        return match path.file_name()?.to_str()? {
+            "Cargo.toml" => Some(Ecosystem::Rust),
+            "go.mod" => Some(Ecosystem::Go),
+            "package.json" | "package-lock.json" => Some(Ecosystem::Js),
+            "pyproject.toml" | "uv.lock" => Some(Ecosystem::Python),
+            _ => None,
+        };
+    }
+    detect_all_ecosystems(path).into_iter().next()
 }
 
 mod nested;
