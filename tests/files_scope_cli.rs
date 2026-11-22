@@ -133,3 +133,16 @@ fn manifestless_git_scripts_use_in_scope_tracked_sources() {
     assert_eq!(data["nodes"], 3);
     assert_eq!(data["edges"], 1);
 }
+
+#[test]
+fn a_manifest_with_only_ignored_sources_has_an_empty_graph() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    git(root, &["init", "-q"]);
+    write(root, "pyproject.toml", "");
+    write(root, ".gitignore", "scratch.py\n");
+    write(root, "scratch.py", "pass");
+    let data = report(root, &["--format", "json"]);
+    assert_eq!(data["nodes"], 0);
+    assert_eq!(data["rows"], json!([]));
+}

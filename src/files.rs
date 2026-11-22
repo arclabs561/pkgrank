@@ -339,12 +339,10 @@ fn discover_files(root: &Path, ecosystem: Ecosystem) -> Vec<PathBuf> {
 
     // Prefer `git ls-files` to respect .gitignore (skips generated/vendored files).
     if let Some(files) = discover_files_git(root, extensions, false) {
-        if !files.is_empty() {
-            return files;
-        }
+        return files;
     }
 
-    // Fallback: manual walk with heuristic excludes.
+    // Fallback when Git cannot enumerate this directory.
     let mut files = Vec::new();
     walk_dir(root, extensions, &mut files);
     files.sort();
