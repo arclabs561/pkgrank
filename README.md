@@ -32,34 +32,21 @@ Rank files in the current repo:
 pkgrank files .
 ```
 
-When stdout is piped, output is JSON (abridged here):
+To try a small graph from an empty directory, create a Python package with
+one import. The scan runs without installing Python dependencies.
 
-```json
-{
-  "schema_version": 1,
-  "ok": true,
-  "command": "files",
-  "ecosystem": "rust",
-  "nodes": 10,
-  "cycle_count": 1,
-  "rows": [
-    {
-      "file": "src/main.rs",
-      "structure": "hub",
-      "dependents": 8,
-      "dependencies": 9,
-      "pagerank": 0.34444790840941036
-    },
-    {
-      "file": "src/dep_graph.rs",
-      "structure": "foundation",
-      "dependents": 9,
-      "dependencies": 0,
-      "pagerank": 0.13405667652537667
-    }
-  ]
-}
+```sh
+mkdir -p demo/sample
+printf '[project]\nname = "sample"\nversion = "0.1.0"\n' > demo/pyproject.toml
+touch demo/sample/__init__.py
+printf 'def hello(): return "hello"\n' > demo/sample/core.py
+printf 'from sample.core import hello\n' > demo/sample/cli.py
+pkgrank files demo --format json --store false
 ```
+
+The report has `"nodes": 3` and `"edges": 1`. In `rows`, `sample/cli.py`
+has one dependency and `sample/core.py` has one dependent. The empty
+`sample/__init__.py` has neither.
 
 Rank packages instead of files:
 
@@ -96,13 +83,15 @@ More commands and configuration are documented in
 
 ## Output
 
-TTY output is text. Piped output is JSON unless `--format text` is set.
-
-Every JSON result carries the same stable wrapper fields: `schema_version`,
-`ok`, `command`, and `rows`.
+The file rankings, package rankings, and blast-radius commands print text in a
+terminal and JSON when piped. Use `--format text` or `--format json` to select
+the format explicitly. Their JSON reports include `schema_version`, `ok`,
+`command`, and `rows`.
 
 `pkgrank files` also reports cycle counts, orphan counts, layer violations, and
-rule violations. It selects ecosystems from manifests at the scan root. If a
+rule violations. It selects ecosystems from manifests at the scan root. In a
+Git checkout with no detected root or nested manifest, it uses tracked source
+files in the selected scope to identify supported languages. If a
 tracked nested project uses another ecosystem, text output gives a command to
 scan it from that root. JSON lists its `ecosystem` and relative `manifest` in
 `unscanned_projects`. An explicit `--ecosystem` suppresses these hints.
