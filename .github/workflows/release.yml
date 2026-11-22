@@ -14,7 +14,7 @@
 # Note that the GitHub Release will be created with a generated
 # title/body based on your changelogs.
 
-name: Release
+name: Release installers
 permissions:
   contents: read
 
@@ -40,6 +40,12 @@ permissions:
 # If there's a prerelease-style suffix to the version, then the release(s)
 # will be marked as a prerelease.
 on:
+  workflow_dispatch:
+    inputs:
+      existing_tag:
+        description: Existing published pkgrank tag to rebuild installers for
+        required: true
+        type: string
   workflow_call:
     inputs:
       tag:
@@ -57,17 +63,40 @@ jobs:
     permissions:
       contents: write
     outputs:
+      source: ${{ steps.source.outputs.sha }}
       val: ${{ steps.plan.outputs.manifest }}
-      tag: ${{ inputs.tag || github.ref_name }}
-      tag-flag: ${{ format('--tag={0}', inputs.tag || github.ref_name) }}
+      tag: ${{ inputs.existing_tag || inputs.tag || github.ref_name }}
+      tag-flag: ${{ format('--tag={0}', inputs.existing_tag || inputs.tag || github.ref_name) }}
       publishing: ${{ !github.event.pull_request }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - name: Require a published version tag for recovery on main
+        if: github.event_name == 'workflow_dispatch' && !inputs.tag
+        env:
+          TAG: ${{ inputs.existing_tag }}
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$ ]]
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
+          ref: ${{ inputs.existing_tag && format('refs/tags/{0}', inputs.existing_tag) || github.sha }}
           persist-credentials: false
           submodules: recursive
+      - id: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Match the recovered tag to the published crate
+        if: github.event_name == 'workflow_dispatch' && !inputs.tag
+        env:
+          TAG: ${{ inputs.existing_tag }}
+          CHECKOUT: ${{ steps.source.outputs.sha }}
+        shell: bash
+        run: |
+          package="pkgrank-${TAG#v}"
+          published=$(curl -fsSL --retry 3 "https://static.crates.io/crates/pkgrank/$package.crate" |
+            tar -xzO "$package/.cargo_vcs_info.json" | jq -er '.git.sha1')
+          test "$published" = "$CHECKOUT"
       - name: Install dist
         # we specify bash to get pipefail; it guards against the `curl` command
         # failing. otherwise `sh` won't catch that `curl` returned non-0
@@ -85,7 +114,7 @@ jobs:
       # but also really annoying to build CI around when it needs secrets to work right.)
       - id: plan
         env:
-          DIST_TAG: ${{ inputs.tag || github.ref_name }}
+          DIST_TAG: ${{ inputs.existing_tag || inputs.tag || github.ref_name }}
         run: |
           if [ -n "$DIST_TAG" ]; then
             dist host --steps=create --tag="$DIST_TAG" --output-format=json > plan-dist-manifest.json
@@ -121,7 +150,8 @@ jobs:
       # - 1 "global" task that builds universal installers
       # - N "local" tasks that build each platform's binaries and platform-specific installers
       matrix: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix }}
-    runs-on: ${{ matrix.runner }}
+    # cargo-dist 0.31 plans macos-14 for Apple Silicon, including in old tags.
+    runs-on: ${{ matrix.runner == 'macos-14' && 'macos-15' || matrix.runner }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/${{ join(matrix.targets, '-') }}-dist-manifest.json
@@ -131,6 +161,7 @@ jobs:
           git config --global core.longpaths true
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
+          ref: ${{ needs.plan.outputs.source }}
           persist-credentials: false
           submodules: recursive
       - name: Install Rust non-interactively if not already installed
@@ -195,6 +226,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
+          ref: ${{ needs.plan.outputs.source }}
           persist-credentials: false
           submodules: recursive
       - name: Install cached dist
@@ -255,6 +287,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
+          ref: ${{ needs.plan.outputs.source }}
           persist-credentials: false
           submodules: recursive
       - name: Install cached dist
@@ -329,5 +362,6 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
+          ref: ${{ needs.plan.outputs.source }}
           persist-credentials: false
           submodules: recursive
