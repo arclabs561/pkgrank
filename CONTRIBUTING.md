@@ -45,6 +45,12 @@ If a job fails after the tag was created, use **Re-run failed jobs** on that run
 
 Pushing a matching version tag with Git also starts both pipelines.
 
+If the crate is already published and the GitHub Release is missing, open
+[Release installers](https://github.com/arclabs561/pkgrank/actions/workflows/release.yml).
+Run it from `main` and enter the existing tag (for example, `v0.6.0`).
+It checks the tag against the commit recorded in the published crate and builds
+all five binary archives and both installers from that commit.
+
 ## License
 
 Dual-licensed under MIT or Apache-2.0 at your option. By contributing you agree your contributions are licensed under both.

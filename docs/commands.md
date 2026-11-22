@@ -86,6 +86,10 @@ pkgrank blast-radius express path/to/npm-project
 pkgrank blast-radius serde --workspace-only=false -n 20
 ```
 
+When the graph contains multiple versions of a package, pass its exact
+`name@version`. If multiple Cargo sources supply the same name and version,
+use a full package ID from the ambiguity message.
+
 Output is sorted by BFS depth, then by PageRank within each depth.
 
 ## Upgrade Priority

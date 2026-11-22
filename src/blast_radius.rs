@@ -9,7 +9,7 @@ use crate::dep_graph::Ecosystem;
 
 #[derive(Parser, Debug, Clone)]
 pub(crate) struct BlastRadiusArgs {
-    /// Package name to analyze (e.g. "serde").
+    /// Package name or name@version. Cargo also accepts a full package ID.
     pub package: String,
 
     /// Path to Cargo.toml, lock file, or directory.
@@ -169,15 +169,38 @@ fn compute_blast_radius_cargo(args: &BlastRadiusArgs) -> Result<BlastRadiusResul
     let pkg_by_id: std::collections::HashMap<&cargo_metadata::PackageId, &cargo_metadata::Package> =
         metadata.packages.iter().map(|p| (&p.id, p)).collect();
 
-    let target_idx = node_map
+    let mut matches: Vec<_> = metadata
+        .packages
         .iter()
-        .find(|(id, _)| {
-            pkg_by_id
-                .get(id)
-                .map(|p| p.name.as_str() == args.package)
-                .unwrap_or(false)
+        .filter_map(|pkg| {
+            let idx = *node_map.get(&pkg.id)?;
+            let versioned = format!("{}@{}", pkg.name, pkg.version);
+            (pkg.name.as_str() == args.package
+                || versioned == args.package
+                || pkg.id.repr == args.package)
+                .then_some((versioned, &pkg.id.repr, idx))
         })
-        .map(|(_, &idx)| idx);
+        .collect();
+    matches.sort_unstable();
+    if matches.len() > 1 {
+        let same_version = matches.windows(2).any(|pair| pair[0].0 == pair[1].0);
+        let choices: Vec<_> = matches
+            .iter()
+            .map(|(versioned, id, _)| {
+                if same_version {
+                    id.as_str()
+                } else {
+                    versioned.as_str()
+                }
+            })
+            .collect();
+        anyhow::bail!(
+            "package '{}' matches multiple packages in the dependency graph; pass one of: {}",
+            args.package,
+            choices.join(", ")
+        );
+    }
+    let target_idx = matches.pop().map(|(_, _, idx)| idx);
 
     let Some(target_idx) = target_idx else {
         return Ok(BlastRadiusResult {
