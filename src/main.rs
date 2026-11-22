@@ -176,7 +176,7 @@ pub(crate) fn reverse_graph<N: Clone>(graph: &DiGraph<N, f64>) -> DiGraph<N, f64
 pub(crate) struct AnalyzeArgs {
     /// Path to a manifest file or directory containing one.
     ///
-    /// Auto-detects ecosystem from directory contents (Cargo.toml, package-lock.json,
+    /// Auto-detects ecosystem from a file name or directory contents (Cargo.toml, package-lock.json,
     /// uv.lock, pyproject.toml, go.mod). Override with `--ecosystem`.
     #[arg(default_value = ".")]
     path: PathBuf,

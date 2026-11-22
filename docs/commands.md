@@ -96,6 +96,19 @@ to a workspace and the target containing its dependencies represent one package.
 The graph covers installed packages and workspaces and omits the lockfile’s
 empty-key root project entry. See the [npm package-lock specification](https://docs.npmjs.com/cli/v11/configuring-npm/package-lock-json/#packages).
 
+For Go, pass the module directory or its `go.mod`. Both use `go mod graph` in
+the module directory. You can also save that command’s output and analyze it
+later with `--ecosystem go`:
+
+```sh
+go mod graph > module-graph.txt
+pkgrank blast-radius example.org/leaf module-graph.txt --ecosystem go
+```
+
+For `app -> bridge -> leaf`, the output for `leaf` contains `bridge` at depth 1
+and `app` at depth 2. These are module requirements. See the
+[Go module graph reference](https://go.dev/ref/mod#go-mod-graph).
+
 Output is sorted by BFS depth, then by PageRank within each depth.
 
 ## Upgrade Priority

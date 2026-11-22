@@ -12,7 +12,7 @@ pub(crate) struct BlastRadiusArgs {
     /// Package name or name@version. Cargo also accepts a full package ID.
     pub package: String,
 
-    /// Path to Cargo.toml, lock file, or directory.
+    /// Path to a package manifest, lockfile, or project directory.
     #[arg(default_value = ".")]
     pub path: PathBuf,
 
