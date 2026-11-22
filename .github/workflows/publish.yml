@@ -4,6 +4,11 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      release:
+        description: Tag the tested version on main, publish the crate, and build installers
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -12,7 +17,13 @@ jobs:
   verify:
     if: github.event_name == 'workflow_dispatch' || !github.event.deleted
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
     steps:
+      - name: Require main for a manual release
+        if: inputs.release
+        run: test "$GITHUB_REF" = refs/heads/main
+
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: ${{ github.sha }}
@@ -24,20 +35,49 @@ jobs:
       - name: Verify the tagged commit is on main
         if: github.event_name == 'push'
         run: git merge-base --is-ancestor HEAD refs/remotes/origin/main
-      - name: Match the tag to the package version
-        if: github.event_name == 'push'
+      - name: Read the package version and check a pushed tag
+        id: version
+        env:
+          EVENT: ${{ github.event_name }}
         run: |
           version=$(cargo metadata --locked --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "pkgrank") | .version')
-          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          if [[ "$EVENT" == push && "$GITHUB_REF_NAME" != "v$version" ]]; then
             echo "Expected v$version for this commit, got $GITHUB_REF_NAME" >&2
             exit 1
           fi
       - run: cargo test --locked --all-targets --all-features
       - run: cargo publish --locked --dry-run --registry crates-io
 
-  publish:
+  tag:
     needs: verify
-    if: github.event_name == 'push'
+    if: github.event_name == 'workflow_dispatch' && inputs.release && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create the tag at the verified commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify.outputs.tag }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f "ref=refs/tags/$TAG" -f "sha=$GITHUB_SHA"
+
+  installers:
+    needs: [verify, tag]
+    # A tag created by GITHUB_TOKEN does not start a push workflow.
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.verify.outputs.tag }}
+    permissions:
+      contents: write
+
+  publish:
+    needs: [verify, tag]
+    if: >-
+      !cancelled() && needs.verify.result == 'success' &&
+      (github.event_name == 'push' || needs.tag.result == 'success')
     runs-on: ubuntu-latest
     environment: crates-io
     concurrency: publish-pkgrank

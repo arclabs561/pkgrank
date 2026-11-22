@@ -35,6 +35,16 @@ cargo test --all-features
 - Link the related issue.
 - CI must be green before requesting review.
 
+## Releasing
+
+Open [Publish pkgrank](https://github.com/arclabs561/pkgrank/actions/workflows/publish.yml)
+and select **Run workflow** on `main`. Leave the box empty for a dry run.
+Check it to test the version in `Cargo.toml`, tag that commit, publish the crate,
+and build the GitHub Release with its installers. Creating an existing tag fails.
+If a job fails after the tag was created, use **Re-run failed jobs** on that run.
+
+Pushing a matching version tag with Git also starts both pipelines.
+
 ## License
 
 Dual-licensed under MIT or Apache-2.0 at your option. By contributing you agree your contributions are licensed under both.

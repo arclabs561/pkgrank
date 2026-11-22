@@ -2,7 +2,7 @@
 #
 # Copyright 2022-2024, axodotdev
 # SPDX-License-Identifier: MIT or Apache-2.0
-# Local security hardening must be reapplied after regenerating this file.
+# Preserve the pinned actions, reusable tag input and existing-tag check after regeneration.
 #
 # CI that:
 #
@@ -40,6 +40,12 @@ permissions:
 # If there's a prerelease-style suffix to the version, then the release(s)
 # will be marked as a prerelease.
 on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Version tag created by the manual publish workflow
+        type: string
+        required: true
   push:
     tags:
       - '**[0-9]+.[0-9]+.[0-9]+*'
@@ -52,8 +58,8 @@ jobs:
       contents: write
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
-      tag: ${{ !github.event.pull_request && github.ref_name || '' }}
-      tag-flag: ${{ !github.event.pull_request && format('--tag={0}', github.ref_name) || '' }}
+      tag: ${{ inputs.tag || github.ref_name }}
+      tag-flag: ${{ format('--tag={0}', inputs.tag || github.ref_name) }}
       publishing: ${{ !github.event.pull_request }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -79,7 +85,7 @@ jobs:
       # but also really annoying to build CI around when it needs secrets to work right.)
       - id: plan
         env:
-          DIST_TAG: ${{ !github.event.pull_request && github.ref_name || '' }}
+          DIST_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           if [ -n "$DIST_TAG" ]; then
             dist host --steps=create --tag="$DIST_TAG" --output-format=json > plan-dist-manifest.json
@@ -295,9 +301,11 @@ jobs:
           PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
           ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
           ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
-          RELEASE_COMMIT: "${{ github.sha }}"
           NEEDS_PLAN_OUTPUTS_TAG: ${{ needs.plan.outputs.tag }}
         run: |
+          tagged_commit=$(gh api --method GET "repos/$GITHUB_REPOSITORY/commits" \
+            -f "sha=refs/tags/$NEEDS_PLAN_OUTPUTS_TAG" -F per_page=1 --jq '.[0].sha')
+          test "$tagged_commit" = "$(git rev-parse HEAD)"
           # Write and read notes from a file to avoid quoting breaking things
           prerelease_args=()
           if [ -n "$PRERELEASE_FLAG" ]; then
@@ -305,7 +313,7 @@ jobs:
           fi
           echo "$ANNOUNCEMENT_BODY" > "$RUNNER_TEMP/notes.txt"
 
-          gh release create "${NEEDS_PLAN_OUTPUTS_TAG}" --target "$RELEASE_COMMIT" "${prerelease_args[@]}" --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+          gh release create "${NEEDS_PLAN_OUTPUTS_TAG}" --verify-tag "${prerelease_args[@]}" --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
   announce:
     needs:
