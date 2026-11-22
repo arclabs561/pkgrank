@@ -1390,7 +1390,7 @@ impl PkgrankStdioMcpFull {
             path: PathBuf::from(params.0.path.as_deref().unwrap_or(".")),
             dev: params.0.dev.unwrap_or(false),
             build: params.0.build.unwrap_or(false),
-            workspace_only: params.0.workspace_only.unwrap_or(true),
+            workspace_only: params.0.workspace_only.unwrap_or(false),
             top: params.0.top.unwrap_or(20),
             format: OutputFormat::Json,
             cache: false,
