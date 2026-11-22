@@ -146,3 +146,64 @@ fn a_manifest_with_only_ignored_sources_has_an_empty_graph() {
     assert_eq!(data["nodes"], 0);
     assert_eq!(data["rows"], json!([]));
 }
+
+#[test]
+fn crates_can_share_a_library_name_without_sharing_dependents() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write(
+        root,
+        "Cargo.toml",
+        "[package]\nname='model'\nversion='0.1.0'\nedition='2021'\n[workspace]\n",
+    );
+    write(root, "src/lib.rs", "pub struct Record;");
+    write(
+        root,
+        "tests/core.rs",
+        "use model::Record;\n#[test] fn core() { let _ = Record; }",
+    );
+    let wrapper = "[package]\nname='model-wrapper'\nversion='0.1.0'\nedition='2021'\n[lib]\nname='model'\n[dependencies]\ncore_model={path='..',package='model'}\n[workspace]\n";
+    write(root, "wrapper/Cargo.toml", wrapper);
+    write(
+        root,
+        "wrapper/src/lib.rs",
+        "pub use core_model::Record;\npub struct Wrapped;",
+    );
+    write(
+        root,
+        "wrapper/tests/adapter.rs",
+        "use model::Wrapped;\n#[test] fn adapter() { let _ = Wrapped; }",
+    );
+    let run = |file| {
+        report(
+            root,
+            &[
+                "--include-tests",
+                "--format",
+                "json",
+                "--cache",
+                "--affected",
+                file,
+            ],
+        )
+    };
+    assert_eq!(
+        run("wrapper/src/lib.rs")["affected"],
+        json!(["wrapper/tests/adapter.rs"])
+    );
+    assert_eq!(
+        run("src/lib.rs")["affected"],
+        json!([
+            "tests/core.rs",
+            "wrapper/src/lib.rs",
+            "wrapper/tests/adapter.rs"
+        ])
+    );
+    // A manifest-only alias change must invalidate the cached import graph.
+    write(
+        root,
+        "wrapper/Cargo.toml",
+        &wrapper.replace("core_model=", "renamed_core="),
+    );
+    assert_eq!(run("src/lib.rs")["affected"], json!(["tests/core.rs"]));
+}
