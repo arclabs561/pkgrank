@@ -8,7 +8,7 @@ where dependency cycles exist.
 
 ## Install
 
-Prebuilt binaries:
+The prebuilt installers use the version shown on the [latest GitHub release](https://github.com/arclabs561/pkgrank/releases/latest).
 
 ```bash
 # macOS / Linux
@@ -18,7 +18,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/arclabs561/pkgrank/rele
 powershell -ExecutionPolicy ByPass -c "irm https://github.com/arclabs561/pkgrank/releases/latest/download/pkgrank-installer.ps1 | iex"
 ```
 
-Or install from crates.io:
+Cargo builds the latest version published on [crates.io](https://crates.io/crates/pkgrank). It can be newer than the prebuilt release.
 
 ```bash
 cargo install pkgrank
