@@ -1119,6 +1119,32 @@ fn join_paren_lines(content: &str) -> Vec<String> {
     result
 }
 
+/// Cargo resolves inherited paths relative to the workspace manifest.
+fn workspace_manifest(dir: &Path) -> Option<(PathBuf, toml::Table)> {
+    for ancestor in dir.ancestors() {
+        let text = match std::fs::read_to_string(ancestor.join("Cargo.toml")) {
+            Ok(text) => text,
+            Err(_) => continue,
+        };
+        let manifest = text.parse::<toml::Table>().ok()?;
+        if manifest.contains_key("workspace") {
+            return Some((ancestor.to_owned(), manifest));
+        }
+        if ancestor == dir {
+            if let Some(path) = manifest
+                .get("package")
+                .and_then(|p| p.get("workspace"))
+                .and_then(toml::Value::as_str)
+            {
+                let root = dir.join(path);
+                let text = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
+                return Some((root, text.parse().ok()?));
+            }
+        }
+    }
+    None
+}
+
 /// Resolve local path dependencies from their declaring manifest without running Cargo.
 fn rust_path_imports(
     dir: &Path,
@@ -1132,6 +1158,7 @@ fn rust_path_imports(
     else {
         return imports;
     };
+    let workspace = workspace_manifest(dir);
     let targets = manifest
         .get("target")
         .and_then(toml::Value::as_table)
@@ -1143,29 +1170,44 @@ fn rust_path_imports(
                 continue;
             };
             for (name, dep) in deps {
-                let Some(index) = dep
+                let (base, dep) =
+                    if dep.get("workspace").and_then(toml::Value::as_bool) == Some(true) {
+                        let Some((root, inherited)) =
+                            workspace.as_ref().and_then(|(root, manifest)| {
+                                Some((
+                                    root.as_path(),
+                                    manifest.get("workspace")?.get("dependencies")?.get(name)?,
+                                ))
+                            })
+                        else {
+                            imports.insert(name.replace('-', "_"), None);
+                            continue;
+                        };
+                        (root, inherited)
+                    } else {
+                        (dir, dep)
+                    };
+                let index = dep
                     .get("path")
                     .and_then(toml::Value::as_str)
-                    .and_then(|p| dir.join(p).canonicalize().ok())
+                    .and_then(|p| base.join(p).canonicalize().ok())
                     .and_then(|p| roots.get(&p))
-                else {
-                    continue;
-                };
-                let import = if dep.get("package").is_some() {
-                    name.replace('-', "_")
-                } else {
-                    crates[*index].1.clone()
+                    .copied();
+                // A registry or Git dependency must shadow a same-named local crate.
+                let import = match index {
+                    Some(i) if dep.get("package").is_none() => crates[i].1.clone(),
+                    _ => name.replace('-', "_"),
                 };
                 // A target-specific alias may refer to different path dependencies.
                 // Without a selected target, leave that import unresolved.
                 imports
                     .entry(import)
                     .and_modify(|previous| {
-                        if *previous != Some(*index) {
+                        if *previous != index {
                             *previous = None;
                         }
                     })
-                    .or_insert(Some(*index));
+                    .or_insert(index);
             }
         }
     }
@@ -3208,7 +3250,7 @@ fn expand_uri(s: &str) -> String {
 }
 
 /// Compute a cache key from the source contents, package manifests and analysis options.
-const FILES_CACHE_FORMAT_VERSION: u8 = 6;
+const FILES_CACHE_FORMAT_VERSION: u8 = 7;
 const FILES_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 fn files_cache_key(
@@ -3228,7 +3270,13 @@ fn files_cache_key(
         args.include_tests,
         args.include_all,
     );
+    let mut manifests = rust_packages.clone();
     for package in rust_packages {
+        if let Some((root, _)) = workspace_manifest(package) {
+            manifests.insert(root);
+        }
+    }
+    for package in manifests {
         let manifest = std::fs::read(package.join("Cargo.toml")).ok()?;
         material.push_str(&format!(
             "rust_package={}:{}\n",
