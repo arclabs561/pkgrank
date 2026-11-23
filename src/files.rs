@@ -1180,35 +1180,34 @@ fn rust_path_imports(
                                 ))
                             })
                         else {
+                            imports.insert(name.replace('-', "_"), None);
                             continue;
                         };
                         (root, inherited)
                     } else {
                         (dir, dep)
                     };
-                let Some(index) = dep
+                let index = dep
                     .get("path")
                     .and_then(toml::Value::as_str)
                     .and_then(|p| base.join(p).canonicalize().ok())
                     .and_then(|p| roots.get(&p))
-                else {
-                    continue;
-                };
-                let import = if dep.get("package").is_some() {
-                    name.replace('-', "_")
-                } else {
-                    crates[*index].1.clone()
+                    .copied();
+                // A registry or Git dependency must shadow a same-named local crate.
+                let import = match index {
+                    Some(i) if dep.get("package").is_none() => crates[i].1.clone(),
+                    _ => name.replace('-', "_"),
                 };
                 // A target-specific alias may refer to different path dependencies.
                 // Without a selected target, leave that import unresolved.
                 imports
                     .entry(import)
                     .and_modify(|previous| {
-                        if *previous != Some(*index) {
+                        if *previous != index {
                             *previous = None;
                         }
                     })
-                    .or_insert(Some(*index));
+                    .or_insert(index);
             }
         }
     }
@@ -3251,7 +3250,7 @@ fn expand_uri(s: &str) -> String {
 }
 
 /// Compute a cache key from file paths + mtimes + analysis args.
-const FILES_CACHE_FORMAT_VERSION: u8 = 6;
+const FILES_CACHE_FORMAT_VERSION: u8 = 7;
 const FILES_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 fn files_cache_key(

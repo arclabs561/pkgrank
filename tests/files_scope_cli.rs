@@ -284,3 +284,31 @@ fn inherited_renamed_path_dependency_reaches_its_dependent() {
     );
     assert_eq!(run()["affected"], json!([]));
 }
+
+#[test]
+fn inherited_registry_dependency_does_not_resolve_to_a_local_namesake() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write(
+        root,
+        "Cargo.toml",
+        "[workspace]\nmembers=['serde','app']\n[workspace.dependencies]\nserde='1'\n",
+    );
+    write(
+        root,
+        "serde/Cargo.toml",
+        "[package]\nname='serde'\nversion='2.0.0'\n",
+    );
+    write(root, "serde/src/lib.rs", "pub struct Value;");
+    write(
+        root,
+        "app/Cargo.toml",
+        "[package]\nname='app'\nversion='0.1.0'\n[dependencies]\nserde.workspace=true\n",
+    );
+    write(root, "app/src/lib.rs", "pub use serde::Serialize;");
+    let r = report(
+        root,
+        &["--format", "json", "--affected", "serde/src/lib.rs"],
+    );
+    assert_eq!(r["affected"], json!([]));
+}
